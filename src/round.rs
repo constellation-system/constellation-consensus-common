@@ -76,8 +76,8 @@ where
     fn take(self) -> (RoundID, Self::Payload);
 }
 
-// XXX split this trait into three parts, so each thread can have only
-// the API it needs.
+// ISSUE #7: split this trait into three parts, so each thread can
+// have only the API it needs.
 
 /// Trait for objects that manage consensus rounds.
 ///
@@ -582,7 +582,7 @@ where
                     }
                     None => Err(SingleRoundCreateError::NoState)
                 }?;
-                // XXX take a size hint in the configuration.
+                // ISSUE #9: take a size hint in the configuration.
                 let backlog = Vec::new();
 
                 Ok(SingleRound {
@@ -782,7 +782,7 @@ where
                    "delivering to backlogged round {}",
                    self.round_id);
 
-            // XXX this is inefficient; do it some other way
+            // ISSUE #10: this is inefficient; do it some other way
             for (backlog_round, outbound) in self.send_backlog.iter_mut() {
                 if backlog_round == &round {
                     outbound.recv(&payload, party).map_err(|err| {

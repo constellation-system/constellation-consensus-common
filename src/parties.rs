@@ -185,7 +185,8 @@ where
     rounds: HashMap<Round, usize>,
     /// Hash table of parties.
     parties: HashMap<Party, RoundIntervals>,
-    /// Next round.  XXX replace this with shifting the RoundIntervals down.
+    /// Next round.
+    // ISSUE #1: replace this with shifting the RoundIntervals down.
     next: usize
 }
 
@@ -692,7 +693,7 @@ impl RoundIntervals {
         }
     }
 
-    // XXX this should shift down the intervals by `round`, to keep
+    // ISSUE #2: this should shift down the intervals by `round`, to keep
     // everything in a [0, n] interval and avoid potential overflows.
     fn advance_to(
         &mut self,
@@ -712,7 +713,7 @@ impl RoundIntervals {
                         if intervals[i].start <= round {
                             *start = Some(..intervals[i].end);
 
-                            // XXX This is inefficient, and should be
+                            // ISSUE #3: This is inefficient, and should be
                             // replaced with a good data structure.
                             intervals.rotate_left(i + 1);
                             intervals.truncate(len - i - 1);
@@ -723,7 +724,7 @@ impl RoundIntervals {
                             // current interval.
                             *start = None;
 
-                            // XXX This is inefficient, and should be
+                            // ISSUE #3: This is inefficient, and should be
                             // replaced with a good data structure.
                             intervals.rotate_left(i);
                             intervals.truncate(len - i);
