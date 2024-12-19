@@ -53,8 +53,8 @@ unix = [
 
 [dependencies]
 bitvec = { version = "1.0" }
-constellation-auth = { git = "https://github.com/constellation-system/constellation-auth.git", branch = "import", default-features = false }
-constellation-common = { git = "https://github.com/constellation-system/constellation-common.git", branch = "import", default-features = false }
+constellation-auth = { git = "https://github.com/constellation-system/constellation-auth.git", branch = "devel", default-features = false }
+constellation-common = { git = "https://github.com/constellation-system/constellation-common.git", branch = "devel", default-features = false }
 log = { version = "0.4", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 
