@@ -19,7 +19,8 @@
 [package]
 name = "constellation-consensus-common"
 description = "Common consensus protocol API for the Constellation distributed systems platform"
-version = "0.0.0"
+repository = "https://github.com/constellation-system/constellation-consensus-common"
+vversion = "0.0.0"
 authors = [ "Eric McCorkle <eric.mccorkle@jhuapl.edu>" ]
 rust-version = "1.81"
 license = "AGPL-3.0-only"
@@ -29,3 +30,34 @@ exclude = [
     ".gitignore"
 ]
 edition = "2018"
+
+[features]
+default = ["gssapi", "log", "openssl", "unix"]
+gssapi = [
+    "constellation-auth/gssapi",
+    "constellation-common/gssapi"
+]
+log = [
+    "dep:log",
+    "constellation-auth/log",
+    "constellation-common/log"
+]
+openssl = [
+    "constellation-auth/openssl",
+    "constellation-common/openssl"
+]
+unix = [
+    "constellation-auth/unix",
+    "constellation-common/unix"
+]
+
+[dependencies]
+bitvec = { version = "1.0" }
+constellation-auth = { git = "https://github.com/constellation-system/constellation-auth.git", branch = "devel", default-features = false }
+constellation-common = { git = "https://github.com/constellation-system/constellation-common.git", branch = "devel", default-features = false }
+log = { version = "0.4", optional = true }
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+env_logger = { version = "0.10" }
+serde_yaml = { version = "0.9" }
