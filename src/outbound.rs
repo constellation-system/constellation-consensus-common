@@ -34,6 +34,7 @@ use std::time::Instant;
 use bitvec::order::Lsb0;
 use bitvec::slice::IterOnes;
 use bitvec::vec::BitVec;
+use constellation_common::error::ScopedError;
 
 use crate::parties::PartyIDMap;
 use crate::round::RoundMsg;
@@ -49,7 +50,7 @@ where
     type PartyID: Clone + Display + From<usize> + Into<usize>;
     /// Type of errors that can result from
     /// [collect_outbound](Outbound::collect_outbound).
-    type CollectOutboundError: Display;
+    type CollectOutboundError: Display + ScopedError;
     /// Type of errors that can result from [recv](Outbound::recv).
     type RecvError: Display;
     /// Type of configuration for creating instances.
