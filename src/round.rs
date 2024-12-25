@@ -98,9 +98,6 @@ where
     Msg: RoundMsg<RoundID> {
     /// Errors can occur getting active parties.
     type PartiesError: Display;
-    /// Type of errors that can result from
-    /// [collect_outbound](Rounds::collect_outbound).
-    type CollectOutboundError: Display;
     /// Errors that can result from [recv](Rounds::recv).
     type RecvError<ReportError>: Display
     where
@@ -109,18 +106,6 @@ where
     type UpdateError: Display;
     /// Errors that can result from [advance](Rounds::advance).
     type AdvanceError: Display;
-
-    /// Collect *all* outbound protocol messages.
-    ///
-    /// This corresponds to
-    /// [collect_outbound](Outbound::collect_outbound) on the
-    /// [Outbound] trait.
-    fn collect_outbound<F>(
-        &mut self,
-        func: F
-    ) -> Result<Option<Instant>, Self::CollectOutboundError>
-    where
-        F: FnMut(&PartyIDMap<Out::PartyID, PartyID>, OutboundGroup<Msg>);
 
     /// Obtain a [PartyIDMap] for a given round.
     fn parties_map(
@@ -379,27 +364,10 @@ where
     Msg: RoundMsg<RoundID>
 {
     type AdvanceError = WithMutexPoison<Inner::AdvanceError>;
-    type CollectOutboundError = WithMutexPoison<Inner::CollectOutboundError>;
     type PartiesError = WithMutexPoison<Inner::PartiesError>;
     type RecvError<ReportError> = WithMutexPoison<Inner::RecvError<ReportError>>
     where ReportError: Display;
     type UpdateError = WithMutexPoison<Inner::UpdateError>;
-
-    fn collect_outbound<F>(
-        &mut self,
-        func: F
-    ) -> Result<Option<Instant>, Self::CollectOutboundError>
-    where
-        F: FnMut(&PartyIDMap<Out::PartyID, PartyID>, OutboundGroup<Msg>) {
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| WithMutexPoison::MutexPoison)?;
-
-        guard
-            .collect_outbound(func)
-            .map_err(|err| WithMutexPoison::Inner { error: err })
-    }
 
     fn parties_map(
         &self,
@@ -654,8 +622,7 @@ where
     }
 }
 
-impl<State, RoundIDs, PartyID, Msg, Out>
-    SharedMsgs<PartyID, Msg>
+impl<State, RoundIDs, PartyID, Msg, Out> SharedMsgs<PartyID, Msg>
     for SingleRound<State, RoundIDs, PartyID, Msg, Out>
 where
     State: ProtoState<RoundIDs::Item, PartyID>
@@ -742,10 +709,6 @@ where
     Msg: RoundMsg<RoundIDs::Item>
 {
     type AdvanceError = SingleRoundAdvanceError<State::CreateRoundError>;
-    type CollectOutboundError = SingleRoundCollectOutboundError<
-        RoundIDs::Item,
-        Out::CollectOutboundError
-    >;
     type PartiesError = SingleRoundPartiesError<RoundIDs::Item>;
     type RecvError<ReportError> = SingleRoundRecvError<
         RoundIDs::Item,
@@ -754,54 +717,6 @@ where
     >
     where ReportError: Display;
     type UpdateError = State::UpdateError;
-
-    fn collect_outbound<F>(
-        &mut self,
-        mut func: F
-    ) -> Result<Option<Instant>, Self::CollectOutboundError>
-    where
-        F: FnMut(&PartyIDMap<Out::PartyID, PartyID>, OutboundGroup<Msg>) {
-        // Get the party may to convert the round-specific party IDs
-        // back to parties.
-        let parties = self.parties_map(&self.round_id).map_err(|err| {
-            SingleRoundCollectOutboundError::Parties { err: err }
-        })?;
-
-        trace!(target: "single-round",
-               "collecting from current round {}",
-               self.round_id);
-
-        let mut min = self
-            .round
-            .collect_outbound(self.round_id.clone(), |group| {
-                func(&parties, group)
-            })
-            .map_err(|err| SingleRoundCollectOutboundError::Inner {
-                err: err
-            })?;
-
-        for i in 0..self.send_backlog.len() {
-            let round = self.send_backlog[i].0.clone();
-            let parties = self.parties_map(&round).map_err(|err| {
-                SingleRoundCollectOutboundError::Parties { err: err }
-            })?;
-            let outbound = &mut self.send_backlog[i].1;
-
-            trace!(target: "single-round",
-                   "collecting from backlog round {}",
-                   round);
-
-            let curr = outbound
-                .collect_outbound(round, |group| func(&parties, group))
-                .map_err(|err| SingleRoundCollectOutboundError::Inner {
-                    err: err
-                })?;
-
-            min = min.and_then(|min| curr.map(|curr| min.min(curr)))
-        }
-
-        Ok(min)
-    }
 
     fn parties_map(
         &self,
