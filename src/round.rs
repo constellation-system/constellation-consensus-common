@@ -325,12 +325,10 @@ where
     }
 }
 
-impl<Inner, RoundID, PartyID, Oper, Msg, Out>
-    SharedMsgs<PartyID, Msg>
+impl<Inner, RoundID, PartyID, Oper, Msg, Out> SharedMsgs<PartyID, Msg>
     for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
 where
-    Inner: Rounds<RoundID, PartyID, Oper, Msg, Out> +
-           SharedMsgs<PartyID, Msg>,
+    Inner: Rounds<RoundID, PartyID, Oper, Msg, Out> + SharedMsgs<PartyID, Msg>,
     RoundID: Clone + Display + Ord,
     PartyID: Clone + Display + Eq + Hash,
     Out: Outbound<RoundID, Msg>,
@@ -340,8 +338,10 @@ where
 
     fn msgs(
         &mut self
-    ) -> Result<(Option<Vec<(Vec<PartyID>, Vec<Msg>)>>, Option<Instant>),
-                Self::MsgsError> {
+    ) -> Result<
+        (Option<Vec<(Vec<PartyID>, Vec<Msg>)>>, Option<Instant>),
+        Self::MsgsError
+    > {
         let mut guard = self
             .inner
             .lock()
@@ -640,8 +640,10 @@ where
 
     fn msgs(
         &mut self
-    ) -> Result<(Option<Vec<(Vec<PartyID>, Vec<Msg>)>>, Option<Instant>),
-                Self::MsgsError> {
+    ) -> Result<
+        (Option<Vec<(Vec<PartyID>, Vec<Msg>)>>, Option<Instant>),
+        Self::MsgsError
+    > {
         let mut group_map = HashMap::new();
 
         // Get the party may to convert the round-specific party IDs
@@ -694,7 +696,6 @@ where
         Ok((groups, min))
     }
 }
-
 
 impl<State, RoundIDs, PartyID, Msg, Out>
     Rounds<RoundIDs::Item, PartyID, State::Oper, Msg, Out>
@@ -850,12 +851,13 @@ where
 
 impl<RoundID, Inner> ScopedError
     for SingleRoundCollectOutboundError<RoundID, Inner>
-where Inner: ScopedError {
-
+where
+    Inner: ScopedError
+{
     fn scope(&self) -> ErrorScope {
         match self {
             SingleRoundCollectOutboundError::Inner { err } => err.scope(),
-            SingleRoundCollectOutboundError::Parties { err } => err.scope(),
+            SingleRoundCollectOutboundError::Parties { err } => err.scope()
         }
     }
 }
@@ -864,8 +866,9 @@ impl<RoundID> ScopedError for SingleRoundPartiesError<RoundID> {
     fn scope(&self) -> ErrorScope {
         match self {
             SingleRoundPartiesError::Parties { err } => err.scope(),
-            SingleRoundPartiesError::BadRound { .. } =>
+            SingleRoundPartiesError::BadRound { .. } => {
                 ErrorScope::Unrecoverable
+            }
         }
     }
 }
