@@ -45,6 +45,9 @@ use std::ops::Range;
 use std::ops::RangeFrom;
 use std::ops::RangeTo;
 
+use constellation_common::error::ErrorScope;
+use constellation_common::error::ScopedError;
+
 /// Trait for the set of parties participating in a consensus protocol.
 ///
 /// This allows parties to be added and removed at given rounds.
@@ -745,6 +748,15 @@ impl RoundIntervals {
                 }
             }
             _ => {}
+        }
+    }
+}
+
+impl ScopedError for StaticPartiesError {
+    #[inline]
+    fn scope(&self) -> ErrorScope {
+        match self {
+            StaticPartiesError::Static => ErrorScope::Unrecoverable
         }
     }
 }
