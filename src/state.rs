@@ -57,8 +57,7 @@ pub trait ProtoState<RoundID, PartyID>: Sized {
 
     /// Create from a configuration.
     fn create(
-        config: Self::Config,
-        first_round: &RoundID
+        config: Self::Config
     ) -> Result<Self, Self::CreateError>;
 
     /// Apply an operation to update the state.

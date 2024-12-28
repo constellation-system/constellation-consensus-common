@@ -31,7 +31,6 @@ use std::fmt::Error;
 use std::fmt::Formatter;
 use std::hash::Hash;
 use std::marker::PhantomData;
-use std::mem::replace;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -213,6 +212,19 @@ where
     inner: Arc<Mutex<Inner>>
 }
 
+struct SingleRoundCurr<State, RoundIDs, PartyID, Msg, Out>
+where
+    State: ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>,
+    RoundIDs: Iterator,
+    RoundIDs::Item: Clone + Display + Ord,
+    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
+    Out: Outbound<RoundIDs::Item, Msg>,
+    Msg: RoundMsg<RoundIDs::Item> {
+    round:
+        Round<State::Round, RoundIDs::Item, State::Oper, Msg, State::Info, Out>,
+    round_id: RoundIDs::Item,
+}
+
 /// A [Rounds] instance that only tracks a single round.
 ///
 /// This is intended for simple examples and testing.
@@ -225,13 +237,10 @@ where
     Out: Outbound<RoundIDs::Item, Msg>,
     Msg: RoundMsg<RoundIDs::Item> {
     state: State,
+    round_ids: RoundIDs,
     send_backlog: Vec<(RoundIDs::Item, Out)>,
     parties: StaticParties<PartyID>,
-    round: Option<
-        Round<State::Round, RoundIDs::Item, State::Oper, Msg, State::Info, Out>
-    >,
-    round_id: RoundIDs::Item,
-    round_ids: RoundIDs
+    round: Option<SingleRoundCurr<State, RoundIDs, PartyID, Msg, Out>>
 }
 
 /// One round in a consensus protocol.
@@ -267,8 +276,7 @@ pub enum SingleRoundCollectOutboundError<RoundID, Inner> {
     },
     Parties {
         err: SingleRoundPartiesError<RoundID>
-    },
-    NoRound
+    }
 }
 
 /// Errors that can occur receiving messages in [SingleRound].
@@ -282,8 +290,7 @@ pub enum SingleRoundRecvError<RoundID, Inner, Party> {
     },
     NotFound {
         party: Party
-    },
-    NoRound
+    }
 }
 
 /// Errors that can occur obtaining parties in [SingleRound].
@@ -309,7 +316,6 @@ pub enum SingleRoundAdvanceError<CreateRound> {
     CreateRound { err: CreateRound },
     Parties { err: StaticPartiesError },
     NotFinished,
-    NoRound,
     NoIDs
 }
 
@@ -723,7 +729,7 @@ where
     Msg: Clone + RoundMsg<RoundIDs::Item>
 {
     pub fn create(
-        mut round_ids: RoundIDs,
+        round_ids: RoundIDs,
         round_config: SingleRoundConfig<State::Config>
     ) -> Result<
         Self,
@@ -732,31 +738,24 @@ where
             State::CreateRoundError
         >
     > {
-        match round_ids.next() {
-            Some(round_id) => {
-                let (backlog_size, state_config) = round_config.take();
-                // Create the initial protocol state.
-                let proto_state = State::create(
-                    state_config,
-                    &round_id,
-                )
-                .map_err(|err| SingleRoundCreateError::State { err: err })?;
-                let backlog = match backlog_size {
-                    Some(size) => Vec::with_capacity(size),
-                    None => Vec::new()
-                };
+        let (backlog_size, state_config) = round_config.take();
+        // Create the initial protocol state.
+        let proto_state = State::create(
+            state_config,
+        )
+            .map_err(|err| SingleRoundCreateError::State { err: err })?;
+        let backlog = match backlog_size {
+            Some(size) => Vec::with_capacity(size),
+            None => Vec::new()
+        };
 
-                Ok(SingleRound {
-                    send_backlog: backlog,
-                    state: proto_state,
-                    parties: StaticParties::default(),
-                    round: None,
-                    round_id: round_id,
-                    round_ids: round_ids
-                })
-            }
-            None => Err(SingleRoundCreateError::NoIDs)
-        }
+        Ok(SingleRound {
+            send_backlog: backlog,
+            state: proto_state,
+            parties: StaticParties::default(),
+            round: None,
+            round_ids: round_ids
+        })
     }
 
     fn collect_outbound_msgs(
@@ -803,27 +802,49 @@ where
         Self::MsgsError
     > {
         let mut group_map = HashMap::new();
+        let mut min: Option<Instant> = None;
+        let curr_parties = match &self.round {
+            Some(curr) =>
+                Some(self.round_parties(&curr.round_id).map_err(|err| {
+                    SingleRoundCollectOutboundError::Parties { err: err }
+                })?),
+            None => None
+        };
 
         // Get the party may to convert the round-specific party IDs
         // back to parties.
-        let parties = self.round_parties(&self.round_id).map_err(|err| {
-            SingleRoundCollectOutboundError::Parties { err: err }
-        })?;
+        match (&mut self.round, curr_parties) {
+            (Some(curr), Some(parties)) => {
 
-        trace!(target: "single-round",
-               "collecting from current round {}",
-               self.round_id);
+                trace!(target: "single-round",
+                       "collecting from current round {}",
+                       curr.round_id);
 
-        let mut min = self
-            .round
-            .as_mut()
-            .ok_or(SingleRoundCollectOutboundError::NoRound)?
-            .collect_outbound(self.round_id.clone(), |group| {
-                Self::collect_outbound_msgs(&mut group_map, &parties, group)
-            })
-            .map_err(|err| SingleRoundCollectOutboundError::Inner {
-                err: err
-            })?;
+                let curr_min = curr
+                    .round
+                    .collect_outbound(curr.round_id.clone(), |group| {
+                        Self::collect_outbound_msgs(
+                            &mut group_map,
+                            &parties,
+                            group
+                        )
+                    })
+                    .map_err(|err| SingleRoundCollectOutboundError::Inner {
+                        err: err
+                    })?;
+
+                min = min
+                    .and_then(|min| curr_min.map(|curr_min| min.min(curr_min)))
+            },
+            (None, None) => {
+                trace!(target: "single-round",
+                       "no current round");
+            },
+            _ => {
+                error!(target: "single-round",
+                       "impossible mismatch between current round and parties");
+            }
+        };
 
         for i in 0..self.send_backlog.len() {
             let round = self.send_backlog[i].0.clone();
@@ -902,8 +923,7 @@ where
         if self
             .round
             .as_ref()
-            .ok_or(SingleRoundAdvanceError::NoRound)?
-            .finished() {
+            .map_or(true, |curr| curr.round.finished()) {
             // Get the next round ID.
             match self.round_ids.next() {
                 Some(newid) => {
@@ -923,26 +943,30 @@ where
 
                     round.map(|(round_state, info, outbound)| {
                         let round = Round::new(info, round_state, outbound);
-                        let round = self
+                        let curr = SingleRoundCurr {
+                            round_id: newid.clone(),
+                            round: round
+                        };
+
+                        if let Some(SingleRoundCurr { round, round_id }) = self
                             .round
-                            .replace(round)
-                            .ok_or(SingleRoundAdvanceError::NoRound)?;
-                        let outbound = round.outbound;
-                        let oldid = replace(&mut self.round_id, newid);
+                            .replace(curr) {
+                            let outbound = round.outbound;
 
-                        // Hang on to the old outbound if it's still going.
-                        if !outbound.finished() {
-                            trace!(target: "single-round",
-                                   "retaining unfinished outbound buffer");
+                            // Hang on to the old outbound if it's still going.
+                            if !outbound.finished() {
+                                trace!(target: "single-round",
+                                       "retaining unfinished outbound buffer");
 
-                            self.send_backlog.push((oldid, outbound));
+                                self.send_backlog.push((round_id, outbound));
+                            }
                         }
 
                         trace!(target: "single-round",
                                "advanced to round {}",
-                               self.round_id);
+                               newid);
 
-                        Ok(Some(self.round_id.clone()))
+                        Ok(Some(newid))
                     })
                         .unwrap_or(Ok(None))
                 }
@@ -1062,10 +1086,10 @@ where
     where
         Reporter: RoundResultReporter<RoundIDs::Item, State::Oper> {
         // Get the round ID from the message.
-        let (round, payload) = msg.take();
+        let (target_id, payload) = msg.take();
         // Get the party map to convert the party to the round-specific ID.
         let parties = self
-            .round_parties(&round)
+            .round_parties(&target_id)
             .map_err(|err| SingleRoundRecvError::Parties { err: err })?;
         let party = match parties.party_idx(party) {
             Some(idx) => Ok(idx),
@@ -1074,33 +1098,35 @@ where
             })
         }?;
 
-        if round == self.round_id {
-            trace!(target: "single-round",
-                   "delivering to current round {}",
-                   self.round_id);
+        match &mut self.round {
+            Some(SingleRoundCurr { round, round_id })
+                if &target_id == round_id => {
+                trace!(target: "single-round",
+                       "delivering to current round {}",
+                       round_id);
 
-            self.round
-                .as_mut()
-                .ok_or(SingleRoundRecvError::NoRound)?
-                .recv(reporter, &round, party, payload)
-                .map_err(|err| SingleRoundRecvError::Inner { err: err })
-        } else {
-            trace!(target: "single-round",
-                   "delivering to backlogged round {}",
-                   self.round_id);
-
-            // ISSUE #10: this is inefficient; do it some other way
-            for (backlog_round, outbound) in self.send_backlog.iter_mut() {
-                if backlog_round == &round {
-                    outbound.recv(&payload, party).map_err(|err| {
-                        SingleRoundRecvError::Inner {
-                            err: RecvError::Recv { err: err }
-                        }
-                    })?;
-                }
+                round
+                    .recv(reporter, &target_id, party, payload)
+                    .map_err(|err| SingleRoundRecvError::Inner { err: err })
             }
+            _ => {
+                trace!(target: "single-round",
+                       "delivering to backlogged round {}",
+                       target_id);
 
-            Ok(())
+                // ISSUE #10: this is inefficient; do it some other way
+                for (backlog_round, outbound) in self.send_backlog.iter_mut() {
+                    if backlog_round == &target_id {
+                        outbound.recv(&payload, party).map_err(|err| {
+                            SingleRoundRecvError::Inner {
+                                err: RecvError::Recv { err: err }
+                            }
+                        })?;
+                    }
+                }
+
+                Ok(())
+            }
         }
     }
 }
@@ -1114,8 +1140,6 @@ where
         match self {
             SingleRoundCollectOutboundError::Inner { err } => err.scope(),
             SingleRoundCollectOutboundError::Parties { err } => err.scope(),
-            SingleRoundCollectOutboundError::NoRound =>
-                ErrorScope::Unrecoverable
         }
     }
 }
@@ -1144,8 +1168,6 @@ where
             SingleRoundAdvanceError::Parties { err } => err.fmt(f),
             SingleRoundAdvanceError::NotFinished =>
                 write!(f, "round not finished"),
-            SingleRoundAdvanceError::NoRound =>
-                write!(f, "no active consensus round"),
             SingleRoundAdvanceError::NoIDs => write!(f, "round IDs exhausted")
         }
     }
@@ -1201,8 +1223,6 @@ where
         match self {
             SingleRoundCollectOutboundError::Parties { err } => err.fmt(f),
             SingleRoundCollectOutboundError::Inner { err } => err.fmt(f),
-            SingleRoundCollectOutboundError::NoRound =>
-                write!(f, "no active consensus round")
         }
     }
 }
@@ -1222,9 +1242,7 @@ where
             SingleRoundRecvError::Inner { err } => err.fmt(f),
             SingleRoundRecvError::Parties { err } => err.fmt(f),
             SingleRoundRecvError::NotFound { party } =>
-                write!(f, "party {} not found", party),
-            SingleRoundRecvError::NoRound =>
-                write!(f, "no active consensus round")
+                write!(f, "party {} not found", party)
         }
     }
 }

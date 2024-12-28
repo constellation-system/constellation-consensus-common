@@ -19,7 +19,9 @@
 use serde::Deserialize;
 use serde::Serialize;
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(
+    Clone, Debug, Default, Deserialize, PartialEq, PartialOrd, Serialize,
+)]
 #[serde(rename = "consensus-pool")]
 #[serde(rename_all = "kebab-case")]
 pub struct SingleRoundConfig<State> {
