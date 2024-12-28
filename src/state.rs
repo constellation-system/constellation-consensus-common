@@ -56,9 +56,7 @@ pub trait ProtoState<RoundID, PartyID>: Sized {
     type UpdateError: Display;
 
     /// Create from a configuration.
-    fn create(
-        config: Self::Config
-    ) -> Result<Self, Self::CreateError>;
+    fn create(config: Self::Config) -> Result<Self, Self::CreateError>;
 
     /// Apply an operation to update the state.
     fn update<P>(

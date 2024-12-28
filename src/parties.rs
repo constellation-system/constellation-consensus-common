@@ -103,7 +103,8 @@ pub trait PartiesRounds<Round> {
 /// Trait for the set of parties participating in a consensus protocol.
 ///
 /// This allows parties to be added and removed at given rounds.
-pub trait Parties<Round, Party>: PartiesUpdate<Party> + PartiesRounds<Round> {
+pub trait Parties<Round, Party>:
+    PartiesUpdate<Party> + PartiesRounds<Round> {
     /// Type of errors that can be returned by
     /// [start_party_at](DynamicParties::start_party_at) and
     /// [stop_party_at](Parties::stop_party_at).
@@ -406,7 +407,6 @@ where
     }
 }
 
-
 impl<Party> StaticParties<Party>
 where
     Party: Clone + Eq + Hash
@@ -471,10 +471,10 @@ impl<Round, Party> Parties<Round, Party> for StaticParties<Party>
 where
     Party: Clone + Eq + Hash
 {
-    type PartyRoundError = StaticPartiesError;
     type PartiesIter<'a> = std::slice::Iter<'a, Party>
     where Self: 'a,
           Party: 'a;
+    type PartyRoundError = StaticPartiesError;
 
     #[inline]
     fn start_party_at(
@@ -589,10 +589,10 @@ where
     Party: Clone + Eq + Hash,
     Round: Clone + Eq + Hash
 {
-    type PartyRoundError = DynamicPartiesError;
     type PartiesIter<'a> = DynamicPartiesIter<'a, Party>
     where Self: 'a,
           Party: 'a;
+    type PartyRoundError = DynamicPartiesError;
 
     fn start_party_at(
         &mut self,

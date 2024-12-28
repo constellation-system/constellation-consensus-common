@@ -46,15 +46,15 @@ use log::trace;
 use crate::config::SingleRoundConfig;
 use crate::outbound::Outbound;
 use crate::outbound::OutboundGroup;
+use crate::parties::PartiesMap;
 use crate::parties::PartiesRounds;
 use crate::parties::PartiesUpdate;
-use crate::parties::PartiesMap;
 use crate::parties::PartyIDMap;
 use crate::parties::StaticParties;
 use crate::parties::StaticPartiesError;
 use crate::state::ProtoState;
-use crate::state::ProtoStateSetParties;
 use crate::state::ProtoStateRound;
+use crate::state::ProtoStateSetParties;
 use crate::state::RoundResultReporter;
 use crate::state::RoundState;
 use crate::state::RoundStateUpdate;
@@ -130,14 +130,13 @@ where
     PartyID: Clone + Display + Eq + Hash,
     PartyData: Clone + Eq + Hash,
     Codec: DatagramCodec<PartyData> {
-
     type SetPartiesError: Display;
 
     fn set_parties(
         &mut self,
         codec: Codec,
         self_party: PartyData,
-        party_data: &[PartyData],
+        party_data: &[PartyData]
     ) -> Result<(), Self::SetPartiesError>;
 }
 
@@ -195,11 +194,11 @@ where
 /// Thread-safe wrapper around a [Rounds] implementation.
 pub struct SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
 where
-    Inner: Rounds +
-           RoundsAdvance<RoundID> +
-           RoundsUpdate<Oper> +
-           RoundsParties<RoundID, PartyID, Out::PartyID> +
-           RoundsRecv<RoundID, PartyID, Oper, Msg>,
+    Inner: Rounds
+        + RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsParties<RoundID, PartyID, Out::PartyID>
+        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
     RoundID: Clone + Display + Ord,
     PartyID: Clone + Display + Eq + Hash,
     Out: Outbound<RoundID, Msg>,
@@ -222,7 +221,7 @@ where
     Msg: RoundMsg<RoundIDs::Item> {
     round:
         Round<State::Round, RoundIDs::Item, State::Oper, Msg, State::Info, Out>,
-    round_id: RoundIDs::Item,
+    round_id: RoundIDs::Item
 }
 
 /// A [Rounds] instance that only tracks a single round.
@@ -328,11 +327,11 @@ pub enum SharedRoundsError<Inner> {
 unsafe impl<Inner, RoundID, PartyID, Oper, Msg, Out> Send
     for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
 where
-    Inner: Rounds +
-           RoundsAdvance<RoundID> +
-           RoundsUpdate<Oper> +
-           RoundsParties<RoundID, PartyID, Out::PartyID> +
-           RoundsRecv<RoundID, PartyID, Oper, Msg>,
+    Inner: Rounds
+        + RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsParties<RoundID, PartyID, Out::PartyID>
+        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
     RoundID: Clone + Display + Ord,
     PartyID: Clone + Display + Eq + Hash,
     Out: Outbound<RoundID, Msg>,
@@ -343,11 +342,11 @@ where
 unsafe impl<Inner, RoundID, PartyID, Oper, Msg, Out> Sync
     for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
 where
-    Inner: Rounds +
-           RoundsAdvance<RoundID> +
-           RoundsUpdate<Oper> +
-           RoundsParties<RoundID, PartyID, Out::PartyID> +
-           RoundsRecv<RoundID, PartyID, Oper, Msg>,
+    Inner: Rounds
+        + RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsParties<RoundID, PartyID, Out::PartyID>
+        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
     RoundID: Clone + Display + Ord,
     PartyID: Clone + Display + Eq + Hash,
     Out: Outbound<RoundID, Msg>,
@@ -358,11 +357,11 @@ where
 impl<Inner, RoundID, PartyID, Oper, Msg, Out>
     SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
 where
-    Inner: Rounds +
-           RoundsAdvance<RoundID> +
-           RoundsUpdate<Oper> +
-           RoundsParties<RoundID, PartyID, Out::PartyID> +
-           RoundsRecv<RoundID, PartyID, Oper, Msg>,
+    Inner: Rounds
+        + RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsParties<RoundID, PartyID, Out::PartyID>
+        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
     RoundID: Clone + Display + Ord,
     PartyID: Clone + Display + Eq + Hash,
     Out: Outbound<RoundID, Msg>,
@@ -384,11 +383,11 @@ where
 impl<Inner, RoundID, PartyID, Oper, Msg, Out> Clone
     for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
 where
-    Inner: Rounds +
-           RoundsAdvance<RoundID> +
-           RoundsUpdate<Oper> +
-           RoundsParties<RoundID, PartyID, Out::PartyID> +
-           RoundsRecv<RoundID, PartyID, Oper, Msg>,
+    Inner: Rounds
+        + RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsParties<RoundID, PartyID, Out::PartyID>
+        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
     RoundID: Clone + Display + Ord,
     PartyID: Clone + Display + Eq + Hash,
     Out: Outbound<RoundID, Msg>,
@@ -410,12 +409,12 @@ where
 impl<Inner, RoundID, PartyID, Oper, Msg, Out> SharedMsgs<PartyID, Msg>
     for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
 where
-    Inner: Rounds +
-           RoundsAdvance<RoundID> +
-           RoundsUpdate<Oper> +
-           RoundsParties<RoundID, PartyID, Out::PartyID> +
-           RoundsRecv<RoundID, PartyID, Oper, Msg> +
-           SharedMsgs<PartyID, Msg>,
+    Inner: Rounds
+        + RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsParties<RoundID, PartyID, Out::PartyID>
+        + RoundsRecv<RoundID, PartyID, Oper, Msg>
+        + SharedMsgs<PartyID, Msg>,
     RoundID: Clone + Display + Ord,
     PartyID: Clone + Display + Eq + Hash,
     Out: Outbound<RoundID, Msg>,
@@ -440,15 +439,14 @@ where
     }
 }
 
-
 impl<Inner, RoundID, PartyID, Oper, Msg, Out> Rounds
     for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
 where
-    Inner: Rounds +
-           RoundsAdvance<RoundID> +
-           RoundsUpdate<Oper> +
-           RoundsParties<RoundID, PartyID, Out::PartyID> +
-           RoundsRecv<RoundID, PartyID, Oper, Msg>,
+    Inner: Rounds
+        + RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsParties<RoundID, PartyID, Out::PartyID>
+        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
     RoundID: Clone + Display + Ord,
     PartyID: Clone + Display + Eq + Hash,
     Out: Outbound<RoundID, Msg>,
@@ -468,11 +466,11 @@ where
 impl<Inner, RoundID, PartyID, Oper, Msg, Out> RoundsAdvance<RoundID>
     for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
 where
-    Inner: Rounds +
-           RoundsAdvance<RoundID> +
-           RoundsUpdate<Oper> +
-           RoundsParties<RoundID, PartyID, Out::PartyID> +
-           RoundsRecv<RoundID, PartyID, Oper, Msg>,
+    Inner: Rounds
+        + RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsParties<RoundID, PartyID, Out::PartyID>
+        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
     RoundID: Clone + Display + Ord,
     PartyID: Clone + Display + Eq + Hash,
     Out: Outbound<RoundID, Msg>,
@@ -495,11 +493,11 @@ where
 impl<Inner, RoundID, PartyID, Oper, Msg, Out> RoundsUpdate<Oper>
     for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
 where
-    Inner: Rounds +
-           RoundsAdvance<RoundID> +
-           RoundsUpdate<Oper> +
-           RoundsParties<RoundID, PartyID, Out::PartyID> +
-           RoundsRecv<RoundID, PartyID, Oper, Msg>,
+    Inner: Rounds
+        + RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsParties<RoundID, PartyID, Out::PartyID>
+        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
     RoundID: Clone + Display + Ord,
     PartyID: Clone + Display + Eq + Hash,
     Out: Outbound<RoundID, Msg>,
@@ -526,12 +524,12 @@ impl<Inner, RoundID, PartyID, Oper, Msg, Out, PartyData, Codec>
     RoundsSetParties<RoundID, PartyID, PartyData, Codec>
     for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
 where
-    Inner: Rounds +
-           RoundsAdvance<RoundID> +
-           RoundsUpdate<Oper> +
-           RoundsParties<RoundID, PartyID, Out::PartyID> +
-           RoundsSetParties<RoundID, PartyID, PartyData, Codec> +
-           RoundsRecv<RoundID, PartyID, Oper, Msg>,
+    Inner: Rounds
+        + RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsParties<RoundID, PartyID, Out::PartyID>
+        + RoundsSetParties<RoundID, PartyID, PartyData, Codec>
+        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
     RoundID: Clone + Display + Ord,
     PartyID: Clone + Display + Eq + Hash,
     Out: Outbound<RoundID, Msg>,
@@ -545,7 +543,7 @@ where
         &mut self,
         codec: Codec,
         self_party: PartyData,
-        party_data: &[PartyData],
+        party_data: &[PartyData]
     ) -> Result<(), Self::SetPartiesError> {
         let mut guard = self
             .inner
@@ -562,11 +560,11 @@ impl<Inner, RoundID, PartyID, Oper, Msg, Out>
     RoundsParties<RoundID, PartyID, Out::PartyID>
     for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
 where
-    Inner: Rounds +
-           RoundsAdvance<RoundID> +
-           RoundsUpdate<Oper> +
-           RoundsParties<RoundID, PartyID, Out::PartyID> +
-           RoundsRecv<RoundID, PartyID, Oper, Msg>,
+    Inner: Rounds
+        + RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsParties<RoundID, PartyID, Out::PartyID>
+        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
     RoundID: Clone + Display + Ord,
     PartyID: Clone + Display + Eq + Hash,
     Out: Outbound<RoundID, Msg>,
@@ -593,11 +591,11 @@ impl<Inner, RoundID, PartyID, Oper, Msg, Out>
     RoundsRecv<RoundID, PartyID, Oper, Msg>
     for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
 where
-    Inner: Rounds +
-           RoundsAdvance<RoundID> +
-           RoundsUpdate<Oper> +
-           RoundsParties<RoundID, PartyID, Out::PartyID> +
-           RoundsRecv<RoundID, PartyID, Oper, Msg>,
+    Inner: Rounds
+        + RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsParties<RoundID, PartyID, Out::PartyID>
+        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
     RoundID: Clone + Display + Ord,
     PartyID: Clone + Display + Eq + Hash,
     Out: Outbound<RoundID, Msg>,
@@ -733,16 +731,11 @@ where
         round_config: SingleRoundConfig<State::Config>
     ) -> Result<
         Self,
-        SingleRoundCreateError<
-            State::CreateError,
-            State::CreateRoundError
-        >
+        SingleRoundCreateError<State::CreateError, State::CreateRoundError>
     > {
         let (backlog_size, state_config) = round_config.take();
         // Create the initial protocol state.
-        let proto_state = State::create(
-            state_config,
-        )
+        let proto_state = State::create(state_config)
             .map_err(|err| SingleRoundCreateError::State { err: err })?;
         let backlog = match backlog_size {
             Some(size) => Vec::with_capacity(size),
@@ -804,10 +797,11 @@ where
         let mut group_map = HashMap::new();
         let mut min: Option<Instant> = None;
         let curr_parties = match &self.round {
-            Some(curr) =>
+            Some(curr) => {
                 Some(self.round_parties(&curr.round_id).map_err(|err| {
                     SingleRoundCollectOutboundError::Parties { err: err }
-                })?),
+                })?)
+            }
             None => None
         };
 
@@ -815,7 +809,6 @@ where
         // back to parties.
         match (&mut self.round, curr_parties) {
             (Some(curr), Some(parties)) => {
-
                 trace!(target: "single-round",
                        "collecting from current round {}",
                        curr.round_id);
@@ -835,11 +828,11 @@ where
 
                 min = min
                     .and_then(|min| curr_min.map(|curr_min| min.min(curr_min)))
-            },
+            }
             (None, None) => {
                 trace!(target: "single-round",
                        "no current round");
-            },
+            }
             _ => {
                 error!(target: "single-round",
                        "impossible mismatch between current round and parties");
@@ -877,7 +870,6 @@ where
         Ok((groups, min))
     }
 }
-
 
 impl<State, RoundIDs, PartyID, Msg, Out> Rounds
     for SingleRound<State, RoundIDs, PartyID, Msg, Out>
@@ -923,7 +915,8 @@ where
         if self
             .round
             .as_ref()
-            .map_or(true, |curr| curr.round.finished()) {
+            .map_or(true, |curr| curr.round.finished())
+        {
             // Get the next round ID.
             match self.round_ids.next() {
                 Some(newid) => {
@@ -941,33 +934,36 @@ where
                             SingleRoundAdvanceError::CreateRound { err: err }
                         })?;
 
-                    round.map(|(round_state, info, outbound)| {
-                        let round = Round::new(info, round_state, outbound);
-                        let curr = SingleRoundCurr {
-                            round_id: newid.clone(),
-                            round: round
-                        };
+                    round
+                        .map(|(round_state, info, outbound)| {
+                            let round = Round::new(info, round_state, outbound);
+                            let curr = SingleRoundCurr {
+                                round_id: newid.clone(),
+                                round: round
+                            };
 
-                        if let Some(SingleRoundCurr { round, round_id }) = self
-                            .round
-                            .replace(curr) {
-                            let outbound = round.outbound;
+                            if let Some(SingleRoundCurr { round, round_id }) =
+                                self.round.replace(curr)
+                            {
+                                let outbound = round.outbound;
 
-                            // Hang on to the old outbound if it's still going.
-                            if !outbound.finished() {
-                                trace!(target: "single-round",
+                                // Hang on to the old outbound if it's still
+                                // going.
+                                if !outbound.finished() {
+                                    trace!(target: "single-round",
                                        "retaining unfinished outbound buffer");
 
-                                self.send_backlog.push((round_id, outbound));
+                                    self.send_backlog
+                                        .push((round_id, outbound));
+                                }
                             }
-                        }
 
-                        trace!(target: "single-round",
+                            trace!(target: "single-round",
                                "advanced to round {}",
                                newid);
 
-                        Ok(Some(newid))
-                    })
+                            Ok(Some(newid))
+                        })
                         .unwrap_or(Ok(None))
                 }
                 None => {
@@ -1023,7 +1019,7 @@ where
         &mut self,
         codec: Codec,
         self_party: PartyData,
-        party_data: &[PartyData],
+        party_data: &[PartyData]
     ) -> Result<(), Self::SetPartiesError> {
         let remap = self.state.set_parties(codec, self_party, party_data)?;
         let parties = (0..party_data.len()).map(PartyID::from).collect();
@@ -1052,9 +1048,7 @@ where
         &self,
         round: &RoundIDs::Item
     ) -> Result<PartyIDMap<Out::PartyID, PartyID>, Self::PartiesError> {
-        Ok(self.parties
-           .parties_map(round)
-           .expect("infallible error"))
+        Ok(self.parties.parties_map(round).expect("infallible error"))
     }
 }
 
@@ -1100,7 +1094,8 @@ where
 
         match &mut self.round {
             Some(SingleRoundCurr { round, round_id })
-                if &target_id == round_id => {
+                if &target_id == round_id =>
+            {
                 trace!(target: "single-round",
                        "delivering to current round {}",
                        round_id);
@@ -1139,7 +1134,7 @@ where
     fn scope(&self) -> ErrorScope {
         match self {
             SingleRoundCollectOutboundError::Inner { err } => err.scope(),
-            SingleRoundCollectOutboundError::Parties { err } => err.scope(),
+            SingleRoundCollectOutboundError::Parties { err } => err.scope()
         }
     }
 }
@@ -1166,8 +1161,9 @@ where
         match self {
             SingleRoundAdvanceError::CreateRound { err } => err.fmt(f),
             SingleRoundAdvanceError::Parties { err } => err.fmt(f),
-            SingleRoundAdvanceError::NotFinished =>
-                write!(f, "round not finished"),
+            SingleRoundAdvanceError::NotFinished => {
+                write!(f, "round not finished")
+            }
             SingleRoundAdvanceError::NoIDs => write!(f, "round IDs exhausted")
         }
     }
@@ -1222,7 +1218,7 @@ where
     ) -> Result<(), Error> {
         match self {
             SingleRoundCollectOutboundError::Parties { err } => err.fmt(f),
-            SingleRoundCollectOutboundError::Inner { err } => err.fmt(f),
+            SingleRoundCollectOutboundError::Inner { err } => err.fmt(f)
         }
     }
 }
@@ -1241,8 +1237,9 @@ where
         match self {
             SingleRoundRecvError::Inner { err } => err.fmt(f),
             SingleRoundRecvError::Parties { err } => err.fmt(f),
-            SingleRoundRecvError::NotFound { party } =>
+            SingleRoundRecvError::NotFound { party } => {
                 write!(f, "party {} not found", party)
+            }
         }
     }
 }

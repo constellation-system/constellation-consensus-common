@@ -49,8 +49,8 @@ use crate::round::RoundsSetParties;
 use crate::round::RoundsUpdate;
 use crate::round::SharedRounds;
 use crate::state::ProtoState;
-use crate::state::ProtoStateSetParties;
 use crate::state::ProtoStateRound;
+use crate::state::ProtoStateSetParties;
 
 /// Base trait for consensus protocol implementations.
 ///
@@ -91,21 +91,17 @@ where
     /// Type of [DatagramCodec]s for consensus protocol messages.
     type Rounds: Rounds
         + RoundsAdvance<RoundIDs::Item>
-        + RoundsUpdate<
-            <Self::State as ProtoState<RoundIDs::Item, PartyID>>::Oper
-        >
+        + RoundsUpdate<<Self::State as ProtoState<RoundIDs::Item, PartyID>>::Oper>
         + RoundsParties<
             RoundIDs::Item,
             PartyID,
             <Self::Out as Outbound<RoundIDs::Item, Self::Msg>>::PartyID
-        >
-        + RoundsRecv<
+        > + RoundsRecv<
             RoundIDs::Item,
             PartyID,
             <Self::State as ProtoState<RoundIDs::Item, PartyID>>::Oper,
             Self::Msg
-        >
-        + RoundsSetParties<RoundIDs::Item, PartyID, Party, PartyCodec>;
+        > + RoundsSetParties<RoundIDs::Item, PartyID, Party, PartyCodec>;
     /// Protocol state machine.
     type State: ProtoStateSetParties<PartyID, Party, PartyCodec>
         + ProtoStateRound<RoundIDs::Item, PartyID, Self::Msg, Self::Out>
@@ -209,7 +205,7 @@ where
 
     fn rounds(
         &self,
-        round_ids: RoundIDs,
+        round_ids: RoundIDs
     ) -> Result<Self::Rounds, Self::RoundsError<P::RoundError>> {
         let rounds = self.inner.rounds(round_ids)?;
 
