@@ -35,12 +35,14 @@
 use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::fmt::Display;
 use std::fmt::Error;
 use std::fmt::Formatter;
 use std::hash::Hash;
 use std::iter::FusedIterator;
 use std::marker::PhantomData;
+use std::mem::replace;
 use std::ops::Range;
 use std::ops::RangeFrom;
 use std::ops::RangeTo;
@@ -48,45 +50,36 @@ use std::ops::RangeTo;
 use constellation_common::error::ErrorScope;
 use constellation_common::error::ScopedError;
 
-/// Trait for the set of parties participating in a consensus protocol.
-///
-/// This allows parties to be added and removed at given rounds.
-pub trait Parties<Round, Party> {
+/// Base trait for tracking parties through consensus rounds.
+pub trait PartiesUpdate<Party> {
+    /// Change the set of parties.
+    ///
+    /// The `parties` argument contains the new set of parties, and
+    /// `map` contains an array that indicates which of the old
+    /// parties corresponds to the new parties.  This is typically
+    /// provided by
+    /// [set_parties](crate::state::ProtoStateSetParties::set_parties).
+    fn update_parties(
+        &mut self,
+        parties: Vec<Party>,
+        map: &[Option<Party>]
+    );
+}
+
+/// Trait for creating and advancing rounds when tracking parties.
+pub trait PartiesRounds<Round> {
     /// Type of errors that can be returned by
-    /// [start_party_at](DynamicParties::start_party_at) and
-    /// [stop_party_at](Parties::stop_party_at).
-    type Error: Display;
-    /// Type of iterators over parties.
-    type PartiesIter<'a>: Iterator<Item = &'a Party>
-    where
-        Self: 'a,
-        Party: 'a;
+    /// [advance_to](PartiesRounds::advance_to).
+    type AdvanceError: Display;
+    /// Type of errors that can be returned by functions that look up
+    /// a specific round.
+    type RoundError: Display;
 
     /// Create a round with id `RoundID`.
     fn next_round(
         &mut self,
         round_id: Round
     );
-
-    /// Set `party` to be valid starting at round `round`.
-    ///
-    /// Calls to this and [stop_party_at](Parties::stop_party_at) must
-    /// happen in ascending order, otherwise an error may occur.
-    fn start_party_at(
-        &mut self,
-        party: Party,
-        round: &Round
-    ) -> Result<(), Self::Error>;
-
-    /// Set `party` to be invalid starting at round `round`.
-    ///
-    /// Calls to this and [start_party_at](DynamicParties::start_party_at) must
-    /// happen in ascending order, otherwise an error may occur.
-    fn stop_party_at(
-        &mut self,
-        party: Party,
-        round: &Round
-    ) -> Result<(), Self::Error>;
 
     /// Advance the lower bound for all parties to round `round`.
     ///
@@ -96,7 +89,7 @@ pub trait Parties<Round, Party> {
     fn advance_to(
         &mut self,
         round: &Round
-    ) -> Result<(), Self::Error>;
+    ) -> Result<(), Self::AdvanceError>;
 
     /// Get a size hint for the number of parties in round `round`.
     ///
@@ -104,13 +97,49 @@ pub trait Parties<Round, Party> {
     fn nparties_hint(
         &self,
         round: &Round
-    ) -> Result<usize, Self::Error>;
+    ) -> Result<usize, Self::RoundError>;
+}
+
+/// Trait for the set of parties participating in a consensus protocol.
+///
+/// This allows parties to be added and removed at given rounds.
+pub trait Parties<Round, Party>:
+    PartiesUpdate<Party> + PartiesRounds<Round> {
+    /// Type of errors that can be returned by
+    /// [start_party_at](DynamicParties::start_party_at) and
+    /// [stop_party_at](Parties::stop_party_at).
+    type PartyRoundError: Display;
+    /// Type of iterators over parties.
+    type PartiesIter<'a>: Iterator<Item = &'a Party>
+    where
+        Self: 'a,
+        Party: 'a;
+
+    /// Set `party` to be valid starting at round `round`.
+    ///
+    /// Calls to this and [stop_party_at](Parties::stop_party_at) must
+    /// happen in ascending order, otherwise an error may occur.
+    fn start_party_at(
+        &mut self,
+        party: Party,
+        round: &Round
+    ) -> Result<(), Self::PartyRoundError>;
+
+    /// Set `party` to be invalid starting at round `round`.
+    ///
+    /// Calls to this and [start_party_at](DynamicParties::start_party_at) must
+    /// happen in ascending order, otherwise an error may occur.
+    fn stop_party_at(
+        &mut self,
+        party: Party,
+        round: &Round
+    ) -> Result<(), Self::PartyRoundError>;
 
     /// Get all active parties at round `round`.
     fn parties(
         &self,
         round: &Round
-    ) -> Result<Self::PartiesIter<'_>, Self::Error>;
+    ) -> Result<Self::PartiesIter<'_>, Self::RoundError>;
 }
 
 /// Trait for obtaining maps from parties to IDs for a given round.
@@ -126,7 +155,7 @@ where
     fn parties_map(
         &self,
         round: &Round
-    ) -> Result<PartyIDMap<PartyID, Party>, Self::Error>
+    ) -> Result<PartyIDMap<PartyID, Party>, Self::RoundError>
     where
         Party: Clone + Eq + Hash {
         Ok(PartyIDMap::from_iter(self.parties(round)?))
@@ -366,6 +395,18 @@ where
     }
 }
 
+impl<Party> Default for StaticParties<Party>
+where
+    Party: Clone + Eq + Hash
+{
+    #[inline]
+    fn default() -> StaticParties<Party> {
+        StaticParties {
+            parties: Vec::new()
+        }
+    }
+}
+
 impl<Party> StaticParties<Party>
 where
     Party: Clone + Eq + Hash
@@ -381,14 +422,26 @@ where
     }
 }
 
-impl<Round, Party> Parties<Round, Party> for StaticParties<Party>
+impl<Party> PartiesUpdate<Party> for StaticParties<Party>
 where
     Party: Clone + Eq + Hash
 {
-    type Error = StaticPartiesError;
-    type PartiesIter<'a> = std::slice::Iter<'a, Party>
-    where Self: 'a,
-          Party: 'a;
+    #[inline]
+    fn update_parties(
+        &mut self,
+        parties: Vec<Party>,
+        _map: &[Option<Party>]
+    ) {
+        self.parties = parties
+    }
+}
+
+impl<Round, Party> PartiesRounds<Round> for StaticParties<Party>
+where
+    Party: Clone + Eq + Hash
+{
+    type AdvanceError = Infallible;
+    type RoundError = Infallible;
 
     #[inline]
     fn next_round(
@@ -396,6 +449,32 @@ where
         _round_id: Round
     ) {
     }
+
+    #[inline]
+    fn advance_to(
+        &mut self,
+        _round: &Round
+    ) -> Result<(), Infallible> {
+        Ok(())
+    }
+
+    #[inline]
+    fn nparties_hint(
+        &self,
+        _round: &Round
+    ) -> Result<usize, Infallible> {
+        Ok(self.parties.len())
+    }
+}
+
+impl<Round, Party> Parties<Round, Party> for StaticParties<Party>
+where
+    Party: Clone + Eq + Hash
+{
+    type PartiesIter<'a> = std::slice::Iter<'a, Party>
+    where Self: 'a,
+          Party: 'a;
+    type PartyRoundError = StaticPartiesError;
 
     #[inline]
     fn start_party_at(
@@ -416,26 +495,10 @@ where
     }
 
     #[inline]
-    fn advance_to(
-        &mut self,
-        _round: &Round
-    ) -> Result<(), StaticPartiesError> {
-        Ok(())
-    }
-
-    #[inline]
-    fn nparties_hint(
-        &self,
-        _round: &Round
-    ) -> Result<usize, StaticPartiesError> {
-        Ok(self.parties.len())
-    }
-
-    #[inline]
     fn parties(
         &self,
         _round: &Round
-    ) -> Result<Self::PartiesIter<'_>, StaticPartiesError> {
+    ) -> Result<Self::PartiesIter<'_>, Infallible> {
         Ok(self.parties.iter())
     }
 }
@@ -448,17 +511,40 @@ where
 {
 }
 
-impl<Round, PartyID, Party> Parties<Round, Party>
+impl<Round, PartyID, Party> PartiesUpdate<Party>
     for DynamicParties<Round, PartyID, Party>
 where
     PartyID: Clone + From<usize> + Into<usize>,
     Party: Clone + Eq + Hash,
     Round: Clone + Eq + Hash
 {
-    type Error = DynamicPartiesError;
-    type PartiesIter<'a> = DynamicPartiesIter<'a, Party>
-    where Self: 'a,
-          Party: 'a;
+    fn update_parties(
+        &mut self,
+        parties: Vec<Party>,
+        map: &[Option<Party>]
+    ) {
+        let new_parties = HashMap::with_capacity(parties.len());
+        let mut old_parties = replace(&mut self.parties, new_parties);
+
+        for (i, new_party) in parties.into_iter().enumerate() {
+            if let Some(old_party) = &map[i] {
+                if let Some(ent) = old_parties.remove(old_party) {
+                    self.parties.insert(new_party, ent);
+                }
+            }
+        }
+    }
+}
+
+impl<Round, PartyID, Party> PartiesRounds<Round>
+    for DynamicParties<Round, PartyID, Party>
+where
+    PartyID: Clone + From<usize> + Into<usize>,
+    Party: Clone + Eq + Hash,
+    Round: Clone + Eq + Hash
+{
+    type AdvanceError = DynamicPartiesError;
+    type RoundError = DynamicPartiesError;
 
     #[inline]
     fn next_round(
@@ -468,6 +554,45 @@ where
         self.rounds.insert(round_id, self.next);
         self.next += 1;
     }
+
+    fn advance_to(
+        &mut self,
+        round: &Round
+    ) -> Result<(), DynamicPartiesError> {
+        match self.rounds.get(round) {
+            Some(round_idx) => {
+                self.parties.retain(|_, rounds| {
+                    rounds.advance_to(*round_idx);
+
+                    !rounds.is_empty()
+                });
+
+                Ok(())
+            }
+            None => Err(DynamicPartiesError::RoundOutsideWindow)
+        }
+    }
+
+    #[inline]
+    fn nparties_hint(
+        &self,
+        _round: &Round
+    ) -> Result<usize, DynamicPartiesError> {
+        Ok(self.parties.len())
+    }
+}
+
+impl<Round, PartyID, Party> Parties<Round, Party>
+    for DynamicParties<Round, PartyID, Party>
+where
+    PartyID: Clone + From<usize> + Into<usize>,
+    Party: Clone + Eq + Hash,
+    Round: Clone + Eq + Hash
+{
+    type PartiesIter<'a> = DynamicPartiesIter<'a, Party>
+    where Self: 'a,
+          Party: 'a;
+    type PartyRoundError = DynamicPartiesError;
 
     fn start_party_at(
         &mut self,
@@ -505,32 +630,6 @@ where
             },
             None => Err(DynamicPartiesError::RoundOutsideWindow)
         }
-    }
-
-    fn advance_to(
-        &mut self,
-        round: &Round
-    ) -> Result<(), DynamicPartiesError> {
-        match self.rounds.get(round) {
-            Some(round_idx) => {
-                self.parties.retain(|_, rounds| {
-                    rounds.advance_to(*round_idx);
-
-                    !rounds.is_empty()
-                });
-
-                Ok(())
-            }
-            None => Err(DynamicPartiesError::RoundOutsideWindow)
-        }
-    }
-
-    #[inline]
-    fn nparties_hint(
-        &self,
-        _round: &Round
-    ) -> Result<usize, DynamicPartiesError> {
-        Ok(self.parties.len())
     }
 
     fn parties(

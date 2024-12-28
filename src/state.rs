@@ -46,10 +46,17 @@ use crate::round::RoundMsg;
 /// This trait allows protocol-specific state to be persisted between
 /// rounds and to be updated with the results of a round.
 pub trait ProtoState<RoundID, PartyID>: Sized {
+    /// Configuration for creating states.
+    type Config;
     /// Type of state-update operations.
     type Oper;
+    /// Type of errors that can occur creating a `ProtoState`.
+    type CreateError: Display;
     /// Errors that can occur applying updates.
     type UpdateError: Display;
+
+    /// Create from a configuration.
+    fn create(config: Self::Config) -> Result<Self, Self::CreateError>;
 
     /// Apply an operation to update the state.
     fn update<P>(
@@ -63,29 +70,23 @@ pub trait ProtoState<RoundID, PartyID>: Sized {
 
 /// Subtrait of [ProtoState] allowing inter-round protocol states to
 /// be created from a configuration object.
-pub trait ProtoStateCreate<RoundID, PartyID, Party, Codec>:
-    ProtoState<RoundID, PartyID>
+pub trait ProtoStateSetParties<PartyID, PartyData, Codec>
 where
-    Codec: DatagramCodec<Party>,
+    Codec: DatagramCodec<PartyData>,
     PartyID: Clone + Display + Eq + Hash + Into<usize> {
-    /// Configuration for creating states.
-    type Config;
     /// Type of errors that can occur creating a `ProtoState`.
-    type CreateError<PartiesErr>: Display
-    where
-        PartiesErr: Display;
+    type SetPartiesError: Display;
 
     /// Create from a configuration.
-    fn create<P>(
-        config: Self::Config,
+    ///
+    /// This returns a map from new IDs to the corresponding old IDs,
+    /// or `None` if the new ID is freshly-created.
+    fn set_parties(
+        &mut self,
         codec: Codec,
-        first_round: &RoundID,
-        parties: &P,
-        self_party: Party,
-        party_data: &[Party]
-    ) -> Result<Self, Self::CreateError<P::Error>>
-    where
-        P: Parties<RoundID, PartyID>;
+        self_party: PartyData,
+        party_data: &[PartyData]
+    ) -> Result<Vec<Option<PartyID>>, Self::SetPartiesError>;
 }
 
 /// Subtrait of [ProtoState] allowing individual round states to be

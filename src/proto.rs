@@ -42,10 +42,15 @@ use crate::outbound::Outbound;
 use crate::parties::PartiesMap;
 use crate::round::RoundMsg;
 use crate::round::Rounds;
+use crate::round::RoundsAdvance;
+use crate::round::RoundsParties;
+use crate::round::RoundsRecv;
+use crate::round::RoundsSetParties;
+use crate::round::RoundsUpdate;
 use crate::round::SharedRounds;
 use crate::state::ProtoState;
-use crate::state::ProtoStateCreate;
 use crate::state::ProtoStateRound;
+use crate::state::ProtoStateSetParties;
 
 /// Base trait for consensus protocol implementations.
 ///
@@ -84,15 +89,21 @@ where
     /// Type of party indexes specific to a round.
     type RoundPartyIdx: Clone + Display + From<usize> + Into<usize>;
     /// Type of [DatagramCodec]s for consensus protocol messages.
-    type Rounds: Rounds<
-        RoundIDs::Item,
-        PartyID,
-        <Self::State as ProtoState<RoundIDs::Item, PartyID>>::Oper,
-        Self::Msg,
-        Self::Out
-    >;
+    type Rounds: Rounds
+        + RoundsAdvance<RoundIDs::Item>
+        + RoundsUpdate<<Self::State as ProtoState<RoundIDs::Item, PartyID>>::Oper>
+        + RoundsParties<
+            RoundIDs::Item,
+            PartyID,
+            <Self::Out as Outbound<RoundIDs::Item, Self::Msg>>::PartyID
+        > + RoundsRecv<
+            RoundIDs::Item,
+            PartyID,
+            <Self::State as ProtoState<RoundIDs::Item, PartyID>>::Oper,
+            Self::Msg
+        > + RoundsSetParties<RoundIDs::Item, PartyID, Party, PartyCodec>;
     /// Protocol state machine.
-    type State: ProtoStateCreate<RoundIDs::Item, PartyID, Party, PartyCodec>
+    type State: ProtoStateSetParties<PartyID, Party, PartyCodec>
         + ProtoStateRound<RoundIDs::Item, PartyID, Self::Msg, Self::Out>
         + ProtoState<RoundIDs::Item, PartyID>;
     /// Type of errors that can occur creating [Rounds].
@@ -103,11 +114,8 @@ where
     /// Obtain the [Rounds] implementation for this consensus protocol.
     fn rounds(
         &self,
-        round_ids: RoundIDs,
-        parties: P,
-        self_party: Party,
-        party_data: &[Party]
-    ) -> Result<Self::Rounds, Self::RoundsError<P::Error>>;
+        round_ids: RoundIDs
+    ) -> Result<Self::Rounds, Self::RoundsError<P::RoundError>>;
 }
 
 /// Wrapper around [ConsensusProto] implementations for sharing
@@ -197,14 +205,9 @@ where
 
     fn rounds(
         &self,
-        round_ids: RoundIDs,
-        parties: P,
-        self_party: Party,
-        party_data: &[Party]
-    ) -> Result<Self::Rounds, Self::RoundsError<P::Error>> {
-        let rounds = self
-            .inner
-            .rounds(round_ids, parties, self_party, party_data)?;
+        round_ids: RoundIDs
+    ) -> Result<Self::Rounds, Self::RoundsError<P::RoundError>> {
+        let rounds = self.inner.rounds(round_ids)?;
 
         Ok(SharedRounds::new(rounds))
     }

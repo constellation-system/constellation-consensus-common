@@ -31,7 +31,6 @@ use std::fmt::Error;
 use std::fmt::Formatter;
 use std::hash::Hash;
 use std::marker::PhantomData;
-use std::mem::replace;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -44,16 +43,18 @@ use constellation_common::net::SharedMsgs;
 use log::error;
 use log::trace;
 
+use crate::config::SingleRoundConfig;
 use crate::outbound::Outbound;
 use crate::outbound::OutboundGroup;
-use crate::parties::Parties;
 use crate::parties::PartiesMap;
+use crate::parties::PartiesRounds;
+use crate::parties::PartiesUpdate;
 use crate::parties::PartyIDMap;
 use crate::parties::StaticParties;
 use crate::parties::StaticPartiesError;
 use crate::state::ProtoState;
-use crate::state::ProtoStateCreate;
 use crate::state::ProtoStateRound;
+use crate::state::ProtoStateSetParties;
 use crate::state::RoundResultReporter;
 use crate::state::RoundState;
 use crate::state::RoundStateUpdate;
@@ -83,35 +84,98 @@ where
     fn take(self) -> (RoundID, Self::Payload);
 }
 
-// ISSUE #7: split this trait into three parts, so each thread can
-// have only the API it needs.
+/// Base trait for objects that manage consensus rounds.
+///
+/// Most protocol implementations do *not* need to provide their own
+/// implementations of this trait.
+pub trait Rounds {
+    /// Clear out any rounds that have fully completed.
+    ///
+    /// This should drop any rounds that have been fully resolved.
+    fn clear_finished(&mut self);
+}
+
+/// Subtrait of [Rounds] allowing advancement to the next round.
+pub trait RoundsAdvance<RoundID>: Rounds
+where
+    RoundID: Clone + Display + Ord {
+    /// Errors that can result from [advance](Rounds::advance).
+    type AdvanceError: Display;
+
+    /// Advance to the next round.
+    fn advance(&mut self) -> Result<Option<RoundID>, Self::AdvanceError>;
+}
+
+/// Subtrait of [Rounds] allowing an update to be applied to the round
+/// state.
+pub trait RoundsUpdate<Oper>: Rounds {
+    /// Errors that can result from [update](Rounds::update).
+    type UpdateError: Display;
+
+    /// Update the inter-round state with `oper`.
+    fn update(
+        &mut self,
+        oper: Oper
+    ) -> Result<(), Self::UpdateError>;
+}
 
 /// Trait for objects that manage consensus rounds.
 ///
 /// Most protocol implementations do *not* need to provide their own
 /// implementations of this trait.
-pub trait Rounds<RoundID, PartyID, Oper, Msg, Out>
+pub trait RoundsSetParties<RoundID, PartyID, PartyData, Codec>:
+    RoundsAdvance<RoundID>
 where
     RoundID: Clone + Display + Ord,
     PartyID: Clone + Display + Eq + Hash,
-    Out: Outbound<RoundID, Msg>,
-    Msg: RoundMsg<RoundID> {
+    PartyData: Clone + Eq + Hash,
+    Codec: DatagramCodec<PartyData> {
+    type SetPartiesError: Display;
+
+    fn set_parties(
+        &mut self,
+        codec: Codec,
+        self_party: PartyData,
+        party_data: &[PartyData]
+    ) -> Result<(), Self::SetPartiesError>;
+}
+
+/// Subtrait of [Rounds] for obtaining the ID mapping for a given
+/// consensus round.
+///
+/// A set of "permanent" party IDs is maintained by the stream and
+/// corresponding [Outbound] instance; however, the active parties for
+/// a given round may vary over time, as parties are added or removed
+/// from the pool.  Thus, it is necessary to maintain a mapping from
+/// "permanent" party IDs to per-round party IDs.
+pub trait RoundsParties<RoundID, PartyID, PartyRoundID>:
+    RoundsAdvance<RoundID>
+where
+    RoundID: Clone + Display + Ord,
+    PartyID: Clone + Display + Eq + Hash,
+    PartyRoundID: Clone + Display + From<usize> + Into<usize> {
     /// Errors can occur getting active parties.
     type PartiesError: Display;
+
+    /// Obtain a [PartyIDMap] for a given round.
+    ///
+    /// This maps permanent party IDs to per-round party IDs.
+    fn round_parties(
+        &self,
+        round: &RoundID
+    ) -> Result<PartyIDMap<PartyRoundID, PartyID>, Self::PartiesError>;
+}
+
+pub trait RoundsRecv<RoundID, PartyID, Oper, Msg>:
+    RoundsAdvance<RoundID> + RoundsUpdate<Oper>
+where
+    RoundID: Clone + Display + Ord,
+    PartyID: Clone + Display + Eq + Hash,
+    Msg: RoundMsg<RoundID> {
     /// Errors that can result from [recv](Rounds::recv).
     type RecvError<ReportError>: Display
     where
         ReportError: Display;
-    /// Errors that can result from [update](Rounds::update).
-    type UpdateError: Display;
-    /// Errors that can result from [advance](Rounds::advance).
-    type AdvanceError: Display;
-
-    /// Obtain a [PartyIDMap] for a given round.
-    fn parties_map(
-        &self,
-        round: &RoundID
-    ) -> Result<PartyIDMap<Out::PartyID, PartyID>, Self::PartiesError>;
 
     /// Process an incoming protocol message from `party`.
     ///
@@ -125,26 +189,16 @@ where
     ) -> Result<(), Self::RecvError<Reporter::ReportError>>
     where
         Reporter: RoundResultReporter<RoundID, Oper>;
-
-    /// Update the inter-round state with `oper`.
-    fn update(
-        &mut self,
-        oper: Oper
-    ) -> Result<(), Self::UpdateError>;
-
-    /// Advance to the next round.
-    fn advance(&mut self) -> Result<Option<RoundID>, Self::AdvanceError>;
-
-    /// Clear out any rounds that have fully completed.
-    ///
-    /// This should drop any rounds that have been fully resolved.
-    fn clear_finished(&mut self);
 }
 
 /// Thread-safe wrapper around a [Rounds] implementation.
 pub struct SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
 where
-    Inner: Rounds<RoundID, PartyID, Oper, Msg, Out>,
+    Inner: Rounds
+        + RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsParties<RoundID, PartyID, Out::PartyID>
+        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
     RoundID: Clone + Display + Ord,
     PartyID: Clone + Display + Eq + Hash,
     Out: Outbound<RoundID, Msg>,
@@ -155,6 +209,19 @@ where
     out: PhantomData<Out>,
     oper: PhantomData<Oper>,
     inner: Arc<Mutex<Inner>>
+}
+
+struct SingleRoundCurr<State, RoundIDs, PartyID, Msg, Out>
+where
+    State: ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>,
+    RoundIDs: Iterator,
+    RoundIDs::Item: Clone + Display + Ord,
+    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
+    Out: Outbound<RoundIDs::Item, Msg>,
+    Msg: RoundMsg<RoundIDs::Item> {
+    round:
+        Round<State::Round, RoundIDs::Item, State::Oper, Msg, State::Info, Out>,
+    round_id: RoundIDs::Item
 }
 
 /// A [Rounds] instance that only tracks a single round.
@@ -169,12 +236,10 @@ where
     Out: Outbound<RoundIDs::Item, Msg>,
     Msg: RoundMsg<RoundIDs::Item> {
     state: State,
+    round_ids: RoundIDs,
     send_backlog: Vec<(RoundIDs::Item, Out)>,
     parties: StaticParties<PartyID>,
-    round:
-        Round<State::Round, RoundIDs::Item, State::Oper, Msg, State::Info, Out>,
-    round_id: RoundIDs::Item,
-    round_ids: RoundIDs
+    round: Option<SingleRoundCurr<State, RoundIDs, PartyID, Msg, Out>>
 }
 
 /// One round in a consensus protocol.
@@ -262,7 +327,11 @@ pub enum SharedRoundsError<Inner> {
 unsafe impl<Inner, RoundID, PartyID, Oper, Msg, Out> Send
     for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
 where
-    Inner: Rounds<RoundID, PartyID, Oper, Msg, Out>,
+    Inner: Rounds
+        + RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsParties<RoundID, PartyID, Out::PartyID>
+        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
     RoundID: Clone + Display + Ord,
     PartyID: Clone + Display + Eq + Hash,
     Out: Outbound<RoundID, Msg>,
@@ -273,7 +342,11 @@ where
 unsafe impl<Inner, RoundID, PartyID, Oper, Msg, Out> Sync
     for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
 where
-    Inner: Rounds<RoundID, PartyID, Oper, Msg, Out>,
+    Inner: Rounds
+        + RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsParties<RoundID, PartyID, Out::PartyID>
+        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
     RoundID: Clone + Display + Ord,
     PartyID: Clone + Display + Eq + Hash,
     Out: Outbound<RoundID, Msg>,
@@ -284,7 +357,11 @@ where
 impl<Inner, RoundID, PartyID, Oper, Msg, Out>
     SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
 where
-    Inner: Rounds<RoundID, PartyID, Oper, Msg, Out>,
+    Inner: Rounds
+        + RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsParties<RoundID, PartyID, Out::PartyID>
+        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
     RoundID: Clone + Display + Ord,
     PartyID: Clone + Display + Eq + Hash,
     Out: Outbound<RoundID, Msg>,
@@ -306,7 +383,11 @@ where
 impl<Inner, RoundID, PartyID, Oper, Msg, Out> Clone
     for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
 where
-    Inner: Rounds<RoundID, PartyID, Oper, Msg, Out>,
+    Inner: Rounds
+        + RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsParties<RoundID, PartyID, Out::PartyID>
+        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
     RoundID: Clone + Display + Ord,
     PartyID: Clone + Display + Eq + Hash,
     Out: Outbound<RoundID, Msg>,
@@ -328,7 +409,12 @@ where
 impl<Inner, RoundID, PartyID, Oper, Msg, Out> SharedMsgs<PartyID, Msg>
     for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
 where
-    Inner: Rounds<RoundID, PartyID, Oper, Msg, Out> + SharedMsgs<PartyID, Msg>,
+    Inner: Rounds
+        + RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsParties<RoundID, PartyID, Out::PartyID>
+        + RoundsRecv<RoundID, PartyID, Oper, Msg>
+        + SharedMsgs<PartyID, Msg>,
     RoundID: Clone + Display + Ord,
     PartyID: Clone + Display + Eq + Hash,
     Out: Outbound<RoundID, Msg>,
@@ -353,35 +439,71 @@ where
     }
 }
 
-impl<Inner, RoundID, PartyID, Oper, Msg, Out>
-    Rounds<RoundID, PartyID, Oper, Msg, Out>
+impl<Inner, RoundID, PartyID, Oper, Msg, Out> Rounds
     for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
 where
-    Inner: Rounds<RoundID, PartyID, Oper, Msg, Out>,
+    Inner: Rounds
+        + RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsParties<RoundID, PartyID, Out::PartyID>
+        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
+    RoundID: Clone + Display + Ord,
+    PartyID: Clone + Display + Eq + Hash,
+    Out: Outbound<RoundID, Msg>,
+    Msg: RoundMsg<RoundID>
+{
+    fn clear_finished(&mut self) {
+        match self.inner.lock() {
+            Ok(mut guard) => guard.clear_finished(),
+            Err(_) => {
+                error!(target: "shared-rounds",
+                       "mutex poisoned in clear_finished");
+            }
+        }
+    }
+}
+
+impl<Inner, RoundID, PartyID, Oper, Msg, Out> RoundsAdvance<RoundID>
+    for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
+where
+    Inner: Rounds
+        + RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsParties<RoundID, PartyID, Out::PartyID>
+        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
     RoundID: Clone + Display + Ord,
     PartyID: Clone + Display + Eq + Hash,
     Out: Outbound<RoundID, Msg>,
     Msg: RoundMsg<RoundID>
 {
     type AdvanceError = WithMutexPoison<Inner::AdvanceError>;
-    type PartiesError = WithMutexPoison<Inner::PartiesError>;
-    type RecvError<ReportError> = WithMutexPoison<Inner::RecvError<ReportError>>
-    where ReportError: Display;
-    type UpdateError = WithMutexPoison<Inner::UpdateError>;
 
-    fn parties_map(
-        &self,
-        round: &RoundID
-    ) -> Result<PartyIDMap<Out::PartyID, PartyID>, Self::PartiesError> {
-        let guard = self
+    fn advance(&mut self) -> Result<Option<RoundID>, Self::AdvanceError> {
+        let mut guard = self
             .inner
             .lock()
             .map_err(|_| WithMutexPoison::MutexPoison)?;
 
         guard
-            .parties_map(round)
+            .advance()
             .map_err(|err| WithMutexPoison::Inner { error: err })
     }
+}
+
+impl<Inner, RoundID, PartyID, Oper, Msg, Out> RoundsUpdate<Oper>
+    for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
+where
+    Inner: Rounds
+        + RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsParties<RoundID, PartyID, Out::PartyID>
+        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
+    RoundID: Clone + Display + Ord,
+    PartyID: Clone + Display + Eq + Hash,
+    Out: Outbound<RoundID, Msg>,
+    Msg: RoundMsg<RoundID>
+{
+    type UpdateError = WithMutexPoison<Inner::UpdateError>;
 
     fn update(
         &mut self,
@@ -396,17 +518,91 @@ where
             .update(oper)
             .map_err(|err| WithMutexPoison::Inner { error: err })
     }
+}
 
-    fn advance(&mut self) -> Result<Option<RoundID>, Self::AdvanceError> {
+impl<Inner, RoundID, PartyID, Oper, Msg, Out, PartyData, Codec>
+    RoundsSetParties<RoundID, PartyID, PartyData, Codec>
+    for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
+where
+    Inner: Rounds
+        + RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsParties<RoundID, PartyID, Out::PartyID>
+        + RoundsSetParties<RoundID, PartyID, PartyData, Codec>
+        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
+    RoundID: Clone + Display + Ord,
+    PartyID: Clone + Display + Eq + Hash,
+    Out: Outbound<RoundID, Msg>,
+    Msg: RoundMsg<RoundID>,
+    PartyData: Clone + Eq + Hash,
+    Codec: DatagramCodec<PartyData>
+{
+    type SetPartiesError = WithMutexPoison<Inner::SetPartiesError>;
+
+    fn set_parties(
+        &mut self,
+        codec: Codec,
+        self_party: PartyData,
+        party_data: &[PartyData]
+    ) -> Result<(), Self::SetPartiesError> {
         let mut guard = self
             .inner
             .lock()
             .map_err(|_| WithMutexPoison::MutexPoison)?;
 
         guard
-            .advance()
+            .set_parties(codec, self_party, party_data)
             .map_err(|err| WithMutexPoison::Inner { error: err })
     }
+}
+
+impl<Inner, RoundID, PartyID, Oper, Msg, Out>
+    RoundsParties<RoundID, PartyID, Out::PartyID>
+    for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
+where
+    Inner: Rounds
+        + RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsParties<RoundID, PartyID, Out::PartyID>
+        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
+    RoundID: Clone + Display + Ord,
+    PartyID: Clone + Display + Eq + Hash,
+    Out: Outbound<RoundID, Msg>,
+    Msg: RoundMsg<RoundID>
+{
+    type PartiesError = WithMutexPoison<Inner::PartiesError>;
+
+    fn round_parties(
+        &self,
+        round: &RoundID
+    ) -> Result<PartyIDMap<Out::PartyID, PartyID>, Self::PartiesError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| WithMutexPoison::MutexPoison)?;
+
+        guard
+            .round_parties(round)
+            .map_err(|err| WithMutexPoison::Inner { error: err })
+    }
+}
+
+impl<Inner, RoundID, PartyID, Oper, Msg, Out>
+    RoundsRecv<RoundID, PartyID, Oper, Msg>
+    for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
+where
+    Inner: Rounds
+        + RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsParties<RoundID, PartyID, Out::PartyID>
+        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
+    RoundID: Clone + Display + Ord,
+    PartyID: Clone + Display + Eq + Hash,
+    Out: Outbound<RoundID, Msg>,
+    Msg: RoundMsg<RoundID>
+{
+    type RecvError<ReportError> = WithMutexPoison<Inner::RecvError<ReportError>>
+    where ReportError: Display;
 
     fn recv<Reporter>(
         &mut self,
@@ -424,16 +620,6 @@ where
         guard
             .recv(reporter, party, msg)
             .map_err(|err| WithMutexPoison::Inner { error: err })
-    }
-
-    fn clear_finished(&mut self) {
-        match self.inner.lock() {
-            Ok(mut guard) => guard.clear_finished(),
-            Err(_) => {
-                error!(target: "shared-rounds",
-                       "mutex poisoned in clear_finished");
-            }
-        }
     }
 }
 
@@ -540,65 +726,29 @@ where
     Out: Outbound<RoundIDs::Item, Msg>,
     Msg: Clone + RoundMsg<RoundIDs::Item>
 {
-    pub fn create<Party, Codec>(
-        mut round_ids: RoundIDs,
-        codec: Codec,
-        parties: StaticParties<PartyID>,
-        self_party: Party,
-        party_data: &[Party],
-        state_config: State::Config
+    pub fn create(
+        round_ids: RoundIDs,
+        round_config: SingleRoundConfig<State::Config>
     ) -> Result<
         Self,
-        SingleRoundCreateError<
-            State::CreateError<StaticPartiesError>,
-            State::CreateRoundError
-        >
-    >
-    where
-        State: ProtoStateCreate<RoundIDs::Item, PartyID, Party, Codec>,
-        Party: Clone + Eq + Hash,
-        Codec: DatagramCodec<Party> {
-        match round_ids.next() {
-            Some(round_id) => {
-                // Create the initial protocol state.
-                let mut proto_state = State::create(
-                    state_config,
-                    codec,
-                    &round_id,
-                    &parties,
-                    self_party,
-                    party_data
-                )
-                .map_err(|err| SingleRoundCreateError::State { err: err })?;
-                // Create the first round.
-                let party_map =
-                    parties.parties_map(&round_id).map_err(|err| {
-                        SingleRoundCreateError::Parties { err: err }
-                    })?;
-                let round =
-                    proto_state.create_round(&party_map).map_err(|err| {
-                        SingleRoundCreateError::CreateRound { err: err }
-                    })?;
-                let round = match round {
-                    Some((round_state, info, outbound)) => {
-                        Ok(Round::new(info, round_state, outbound))
-                    }
-                    None => Err(SingleRoundCreateError::NoState)
-                }?;
-                // ISSUE #9: take a size hint in the configuration.
-                let backlog = Vec::new();
+        SingleRoundCreateError<State::CreateError, State::CreateRoundError>
+    > {
+        let (backlog_size, state_config) = round_config.take();
+        // Create the initial protocol state.
+        let proto_state = State::create(state_config)
+            .map_err(|err| SingleRoundCreateError::State { err: err })?;
+        let backlog = match backlog_size {
+            Some(size) => Vec::with_capacity(size),
+            None => Vec::new()
+        };
 
-                Ok(SingleRound {
-                    send_backlog: backlog,
-                    state: proto_state,
-                    parties: parties,
-                    round: round,
-                    round_id: round_id,
-                    round_ids: round_ids
-                })
-            }
-            None => Err(SingleRoundCreateError::NoIDs)
-        }
+        Ok(SingleRound {
+            send_backlog: backlog,
+            state: proto_state,
+            parties: StaticParties::default(),
+            round: None,
+            round_ids: round_ids
+        })
     }
 
     fn collect_outbound_msgs(
@@ -645,29 +795,53 @@ where
         Self::MsgsError
     > {
         let mut group_map = HashMap::new();
+        let mut min: Option<Instant> = None;
+        let curr_parties = match &self.round {
+            Some(curr) => {
+                Some(self.round_parties(&curr.round_id).map_err(|err| {
+                    SingleRoundCollectOutboundError::Parties { err: err }
+                })?)
+            }
+            None => None
+        };
 
         // Get the party may to convert the round-specific party IDs
         // back to parties.
-        let parties = self.parties_map(&self.round_id).map_err(|err| {
-            SingleRoundCollectOutboundError::Parties { err: err }
-        })?;
+        match (&mut self.round, curr_parties) {
+            (Some(curr), Some(parties)) => {
+                trace!(target: "single-round",
+                       "collecting from current round {}",
+                       curr.round_id);
 
-        trace!(target: "single-round",
-               "collecting from current round {}",
-               self.round_id);
+                let curr_min = curr
+                    .round
+                    .collect_outbound(curr.round_id.clone(), |group| {
+                        Self::collect_outbound_msgs(
+                            &mut group_map,
+                            &parties,
+                            group
+                        )
+                    })
+                    .map_err(|err| SingleRoundCollectOutboundError::Inner {
+                        err: err
+                    })?;
 
-        let mut min = self
-            .round
-            .collect_outbound(self.round_id.clone(), |group| {
-                Self::collect_outbound_msgs(&mut group_map, &parties, group)
-            })
-            .map_err(|err| SingleRoundCollectOutboundError::Inner {
-                err: err
-            })?;
+                min = min
+                    .and_then(|min| curr_min.map(|curr_min| min.min(curr_min)))
+            }
+            (None, None) => {
+                trace!(target: "single-round",
+                       "no current round");
+            }
+            _ => {
+                error!(target: "single-round",
+                       "impossible mismatch between current round and parties");
+            }
+        };
 
         for i in 0..self.send_backlog.len() {
             let round = self.send_backlog[i].0.clone();
-            let parties = self.parties_map(&round).map_err(|err| {
+            let parties = self.round_parties(&round).map_err(|err| {
                 SingleRoundCollectOutboundError::Parties { err: err }
             })?;
             let outbound = &mut self.send_backlog[i].1;
@@ -697,8 +871,24 @@ where
     }
 }
 
-impl<State, RoundIDs, PartyID, Msg, Out>
-    Rounds<RoundIDs::Item, PartyID, State::Oper, Msg, Out>
+impl<State, RoundIDs, PartyID, Msg, Out> Rounds
+    for SingleRound<State, RoundIDs, PartyID, Msg, Out>
+where
+    State: ProtoState<RoundIDs::Item, PartyID>
+        + ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>,
+    RoundIDs: Iterator,
+    RoundIDs::Item: Clone + Display + Ord,
+    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
+    Out: Outbound<RoundIDs::Item, Msg>,
+    Msg: RoundMsg<RoundIDs::Item>
+{
+    fn clear_finished(&mut self) {
+        self.send_backlog
+            .retain(|(_, outbound)| !outbound.finished())
+    }
+}
+
+impl<State, RoundIDs, PartyID, Msg, Out> RoundsAdvance<RoundIDs::Item>
     for SingleRound<State, RoundIDs, PartyID, Msg, Out>
 where
     State: ProtoState<RoundIDs::Item, PartyID>
@@ -710,30 +900,6 @@ where
     Msg: RoundMsg<RoundIDs::Item>
 {
     type AdvanceError = SingleRoundAdvanceError<State::CreateRoundError>;
-    type PartiesError = SingleRoundPartiesError<RoundIDs::Item>;
-    type RecvError<ReportError> = SingleRoundRecvError<
-        RoundIDs::Item,
-        RecvError<Out::RecvError, ReportError>,
-        PartyID
-    >
-    where ReportError: Display;
-    type UpdateError = State::UpdateError;
-
-    fn parties_map(
-        &self,
-        round: &RoundIDs::Item
-    ) -> Result<PartyIDMap<Out::PartyID, PartyID>, Self::PartiesError> {
-        self.parties
-            .parties_map(round)
-            .map_err(|err| SingleRoundPartiesError::Parties { err: err })
-    }
-
-    fn update(
-        &mut self,
-        oper: State::Oper
-    ) -> Result<(), Self::UpdateError> {
-        self.state.update(&mut self.parties, oper)
-    }
 
     fn advance(
         &mut self
@@ -746,7 +912,11 @@ where
         trace!(target: "single-round",
                "trying to advance round");
 
-        if round.finished() {
+        if self
+            .round
+            .as_ref()
+            .map_or(true, |curr| curr.round.finished())
+        {
             // Get the next round ID.
             match self.round_ids.next() {
                 Some(newid) => {
@@ -754,35 +924,47 @@ where
                     self.parties.next_round(newid.clone());
 
                     // Create the next round state and outbound buffer.
-                    let party_map =
-                        self.parties.parties_map(&round).map_err(|err| {
-                            SingleRoundAdvanceError::Parties { err: err }
-                        })?;
+                    let party_map = self
+                        .parties
+                        .parties_map(&round)
+                        .expect("infallible error");
+
                     let round =
                         self.state.create_round(&party_map).map_err(|err| {
                             SingleRoundAdvanceError::CreateRound { err: err }
                         })?;
 
-                    Ok(round.map(|(round_state, info, outbound)| {
-                        let round = Round::new(info, round_state, outbound);
-                        let round = replace(&mut self.round, round);
-                        let outbound = round.outbound;
-                        let oldid = replace(&mut self.round_id, newid);
+                    round
+                        .map(|(round_state, info, outbound)| {
+                            let round = Round::new(info, round_state, outbound);
+                            let curr = SingleRoundCurr {
+                                round_id: newid.clone(),
+                                round: round
+                            };
 
-                        // Hang on to the old outbound if it's still going.
-                        if !outbound.finished() {
+                            if let Some(SingleRoundCurr { round, round_id }) =
+                                self.round.replace(curr)
+                            {
+                                let outbound = round.outbound;
+
+                                // Hang on to the old outbound if it's still
+                                // going.
+                                if !outbound.finished() {
+                                    trace!(target: "single-round",
+                                       "retaining unfinished outbound buffer");
+
+                                    self.send_backlog
+                                        .push((round_id, outbound));
+                                }
+                            }
+
                             trace!(target: "single-round",
-                                   "retaining unfinished outbound buffer");
-
-                            self.send_backlog.push((oldid, outbound));
-                        }
-
-                        trace!(target: "single-round",
                                "advanced to round {}",
-                               self.round_id);
+                               newid);
 
-                        self.round_id.clone()
-                    }))
+                            Ok(Some(newid))
+                        })
+                        .unwrap_or(Ok(None))
                 }
                 None => {
                     // IDs are exhausted.
@@ -793,6 +975,101 @@ where
             Err(SingleRoundAdvanceError::NotFinished)
         }
     }
+}
+
+impl<State, RoundIDs, PartyID, Msg, Out> RoundsUpdate<State::Oper>
+    for SingleRound<State, RoundIDs, PartyID, Msg, Out>
+where
+    State: ProtoState<RoundIDs::Item, PartyID>
+        + ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>,
+    RoundIDs: Iterator,
+    RoundIDs::Item: Clone + Display + Ord,
+    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
+    Out: Outbound<RoundIDs::Item, Msg>,
+    Msg: RoundMsg<RoundIDs::Item>
+{
+    type UpdateError = State::UpdateError;
+
+    fn update(
+        &mut self,
+        oper: State::Oper
+    ) -> Result<(), Self::UpdateError> {
+        self.state.update(&mut self.parties, oper)
+    }
+}
+
+impl<State, RoundIDs, PartyID, Msg, Out, PartyData, Codec>
+    RoundsSetParties<RoundIDs::Item, PartyID, PartyData, Codec>
+    for SingleRound<State, RoundIDs, PartyID, Msg, Out>
+where
+    State: ProtoState<RoundIDs::Item, PartyID>
+        + ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>
+        + ProtoStateSetParties<PartyID, PartyData, Codec>,
+    RoundIDs: Iterator,
+    RoundIDs::Item: Clone + Display + Ord,
+    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
+    Out: Outbound<RoundIDs::Item, Msg>,
+    Msg: RoundMsg<RoundIDs::Item>,
+    PartyData: Clone + Eq + Hash,
+    Codec: DatagramCodec<PartyData>
+{
+    type SetPartiesError = State::SetPartiesError;
+
+    fn set_parties(
+        &mut self,
+        codec: Codec,
+        self_party: PartyData,
+        party_data: &[PartyData]
+    ) -> Result<(), Self::SetPartiesError> {
+        let remap = self.state.set_parties(codec, self_party, party_data)?;
+        let parties = (0..party_data.len()).map(PartyID::from).collect();
+
+        self.parties.update_parties(parties, &remap);
+
+        Ok(())
+    }
+}
+
+impl<State, RoundIDs, PartyID, Msg, Out>
+    RoundsParties<RoundIDs::Item, PartyID, Out::PartyID>
+    for SingleRound<State, RoundIDs, PartyID, Msg, Out>
+where
+    State: ProtoState<RoundIDs::Item, PartyID>
+        + ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>,
+    RoundIDs: Iterator,
+    RoundIDs::Item: Clone + Display + Ord,
+    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
+    Out: Outbound<RoundIDs::Item, Msg>,
+    Msg: RoundMsg<RoundIDs::Item>
+{
+    type PartiesError = SingleRoundPartiesError<RoundIDs::Item>;
+
+    fn round_parties(
+        &self,
+        round: &RoundIDs::Item
+    ) -> Result<PartyIDMap<Out::PartyID, PartyID>, Self::PartiesError> {
+        Ok(self.parties.parties_map(round).expect("infallible error"))
+    }
+}
+
+impl<State, RoundIDs, PartyID, Msg, Out>
+    RoundsRecv<RoundIDs::Item, PartyID, State::Oper, Msg>
+    for SingleRound<State, RoundIDs, PartyID, Msg, Out>
+where
+    State: ProtoState<RoundIDs::Item, PartyID>
+        + ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>,
+    RoundIDs: Iterator,
+    RoundIDs::Item: Clone + Display + Ord,
+    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
+    Out: Outbound<RoundIDs::Item, Msg>,
+    Msg: RoundMsg<RoundIDs::Item>
+{
+    type RecvError<ReportError> = SingleRoundRecvError<
+        RoundIDs::Item,
+        RecvError<Out::RecvError, ReportError>,
+        PartyID
+    >
+    where ReportError: Display;
 
     fn recv<Reporter>(
         &mut self,
@@ -803,10 +1080,10 @@ where
     where
         Reporter: RoundResultReporter<RoundIDs::Item, State::Oper> {
         // Get the round ID from the message.
-        let (round, payload) = msg.take();
+        let (target_id, payload) = msg.take();
         // Get the party map to convert the party to the round-specific ID.
         let parties = self
-            .parties_map(&round)
+            .round_parties(&target_id)
             .map_err(|err| SingleRoundRecvError::Parties { err: err })?;
         let party = match parties.party_idx(party) {
             Some(idx) => Ok(idx),
@@ -815,37 +1092,37 @@ where
             })
         }?;
 
-        if round == self.round_id {
-            trace!(target: "single-round",
-                   "delivering to current round {}",
-                   self.round_id);
+        match &mut self.round {
+            Some(SingleRoundCurr { round, round_id })
+                if &target_id == round_id =>
+            {
+                trace!(target: "single-round",
+                       "delivering to current round {}",
+                       round_id);
 
-            self.round
-                .recv(reporter, &round, party, payload)
-                .map_err(|err| SingleRoundRecvError::Inner { err: err })
-        } else {
-            trace!(target: "single-round",
-                   "delivering to backlogged round {}",
-                   self.round_id);
-
-            // ISSUE #10: this is inefficient; do it some other way
-            for (backlog_round, outbound) in self.send_backlog.iter_mut() {
-                if backlog_round == &round {
-                    outbound.recv(&payload, party).map_err(|err| {
-                        SingleRoundRecvError::Inner {
-                            err: RecvError::Recv { err: err }
-                        }
-                    })?;
-                }
+                round
+                    .recv(reporter, &target_id, party, payload)
+                    .map_err(|err| SingleRoundRecvError::Inner { err: err })
             }
+            _ => {
+                trace!(target: "single-round",
+                       "delivering to backlogged round {}",
+                       target_id);
 
-            Ok(())
+                // ISSUE #10: this is inefficient; do it some other way
+                for (backlog_round, outbound) in self.send_backlog.iter_mut() {
+                    if backlog_round == &target_id {
+                        outbound.recv(&payload, party).map_err(|err| {
+                            SingleRoundRecvError::Inner {
+                                err: RecvError::Recv { err: err }
+                            }
+                        })?;
+                    }
+                }
+
+                Ok(())
+            }
         }
-    }
-
-    fn clear_finished(&mut self) {
-        self.send_backlog
-            .retain(|(_, outbound)| !outbound.finished())
     }
 }
 
