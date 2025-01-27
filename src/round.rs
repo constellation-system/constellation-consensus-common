@@ -826,8 +826,12 @@ where
                         err: err
                     })?;
 
-                min = min
-                    .and_then(|min| curr_min.map(|curr_min| min.min(curr_min)))
+                min = match (min, curr_min) {
+                    (Some(min), Some(curr_min)) => Some(min.min(curr_min)),
+                    (Some(min), _) => Some(min),
+                    (_, Some(curr_min)) => Some(curr_min),
+                    _ => None
+                };
             }
             (None, None) => {
                 trace!(target: "single-round",
