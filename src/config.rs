@@ -16,20 +16,33 @@
 // License along with this program.  If not, see
 // <https://www.gnu.org/licenses/>.
 
-//! Common API for consensus protocols for the Constellation
-//! distributed systems platform.
-//!
-//! This crate provides a base API for consensus protocol
-//! implemenations that can be used by the Constellation consensus
-//! component.
-//!
-//! To implement a new consensus protocol, see the [proto] module.
-#![allow(clippy::redundant_field_names)]
-#![allow(clippy::type_complexity)]
+use serde::Deserialize;
+use serde::Serialize;
 
-pub mod config;
-pub mod outbound;
-pub mod parties;
-pub mod proto;
-pub mod round;
-pub mod state;
+#[derive(
+    Clone, Debug, Default, Deserialize, PartialEq, PartialOrd, Serialize,
+)]
+#[serde(rename = "consensus-pool")]
+#[serde(rename_all = "kebab-case")]
+pub struct SingleRoundConfig<State> {
+    #[serde(default)]
+    backlog_size_hint: Option<usize>,
+    #[serde(flatten)]
+    state: State
+}
+
+impl<State> SingleRoundConfig<State> {
+    #[inline]
+    pub fn backlog_size_hint(&self) -> Option<usize> {
+        self.backlog_size_hint
+    }
+
+    #[inline]
+    pub fn state(&self) -> &State {
+        &self.state
+    }
+
+    pub fn take(self) -> (Option<usize>, State) {
+        (self.backlog_size_hint, self.state)
+    }
+}
