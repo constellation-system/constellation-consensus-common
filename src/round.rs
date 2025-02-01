@@ -35,7 +35,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
 
-use constellation_common::codec::DatagramCodec;
+use constellation_common::codec::Codec;
 use constellation_common::error::ErrorScope;
 use constellation_common::error::ScopedError;
 use constellation_common::error::WithMutexPoison;
@@ -123,18 +123,18 @@ pub trait RoundsUpdate<Oper>: Rounds {
 ///
 /// Most protocol implementations do *not* need to provide their own
 /// implementations of this trait.
-pub trait RoundsSetParties<RoundID, PartyID, PartyData, Codec>:
+pub trait RoundsSetParties<RoundID, PartyID, PartyData, C>:
     RoundsAdvance<RoundID>
 where
     RoundID: Clone + Display + Ord,
     PartyID: Clone + Display + Eq + Hash,
     PartyData: Clone + Eq + Hash,
-    Codec: DatagramCodec<PartyData> {
+    C: Codec<PartyData> {
     type SetPartiesError: Display;
 
     fn set_parties(
         &mut self,
-        codec: Codec,
+        codec: C,
         self_party: PartyData,
         party_data: &[PartyData]
     ) -> Result<(), Self::SetPartiesError>;
@@ -520,28 +520,28 @@ where
     }
 }
 
-impl<Inner, RoundID, PartyID, Oper, Msg, Out, PartyData, Codec>
-    RoundsSetParties<RoundID, PartyID, PartyData, Codec>
+impl<Inner, RoundID, PartyID, Oper, Msg, Out, PartyData, C>
+    RoundsSetParties<RoundID, PartyID, PartyData, C>
     for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
 where
     Inner: Rounds
         + RoundsAdvance<RoundID>
         + RoundsUpdate<Oper>
         + RoundsParties<RoundID, PartyID, Out::PartyID>
-        + RoundsSetParties<RoundID, PartyID, PartyData, Codec>
+        + RoundsSetParties<RoundID, PartyID, PartyData, C>
         + RoundsRecv<RoundID, PartyID, Oper, Msg>,
     RoundID: Clone + Display + Ord,
     PartyID: Clone + Display + Eq + Hash,
     Out: Outbound<RoundID, Msg>,
     Msg: RoundMsg<RoundID>,
     PartyData: Clone + Eq + Hash,
-    Codec: DatagramCodec<PartyData>
+    C: Codec<PartyData>
 {
     type SetPartiesError = WithMutexPoison<Inner::SetPartiesError>;
 
     fn set_parties(
         &mut self,
-        codec: Codec,
+        codec: C,
         self_party: PartyData,
         party_data: &[PartyData]
     ) -> Result<(), Self::SetPartiesError> {
@@ -1000,26 +1000,26 @@ where
     }
 }
 
-impl<State, RoundIDs, PartyID, Msg, Out, PartyData, Codec>
-    RoundsSetParties<RoundIDs::Item, PartyID, PartyData, Codec>
+impl<State, RoundIDs, PartyID, Msg, Out, PartyData, C>
+    RoundsSetParties<RoundIDs::Item, PartyID, PartyData, C>
     for SingleRound<State, RoundIDs, PartyID, Msg, Out>
 where
     State: ProtoState<RoundIDs::Item, PartyID>
         + ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>
-        + ProtoStateSetParties<PartyID, PartyData, Codec>,
+        + ProtoStateSetParties<PartyID, PartyData, C>,
     RoundIDs: Iterator,
     RoundIDs::Item: Clone + Display + Ord,
     PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
     Out: Outbound<RoundIDs::Item, Msg>,
     Msg: RoundMsg<RoundIDs::Item>,
     PartyData: Clone + Eq + Hash,
-    Codec: DatagramCodec<PartyData>
+    C: Codec<PartyData>
 {
     type SetPartiesError = State::SetPartiesError;
 
     fn set_parties(
         &mut self,
-        codec: Codec,
+        codec: C,
         self_party: PartyData,
         party_data: &[PartyData]
     ) -> Result<(), Self::SetPartiesError> {
