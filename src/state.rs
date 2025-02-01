@@ -34,7 +34,7 @@
 use std::fmt::Display;
 use std::hash::Hash;
 
-use constellation_common::codec::DatagramCodec;
+use constellation_common::codec::Codec;
 
 use crate::outbound::Outbound;
 use crate::parties::Parties;
@@ -70,9 +70,9 @@ pub trait ProtoState<RoundID, PartyID>: Sized {
 
 /// Subtrait of [ProtoState] allowing inter-round protocol states to
 /// be created from a configuration object.
-pub trait ProtoStateSetParties<PartyID, PartyData, Codec>
+pub trait ProtoStateSetParties<PartyID, PartyData, C>
 where
-    Codec: DatagramCodec<PartyData>,
+    C: Codec<PartyData>,
     PartyID: Clone + Display + Eq + Hash + Into<usize> {
     /// Type of errors that can occur creating a `ProtoState`.
     type SetPartiesError: Display;
@@ -83,7 +83,7 @@ where
     /// or `None` if the new ID is freshly-created.
     fn set_parties(
         &mut self,
-        codec: Codec,
+        codec: C,
         self_party: PartyData,
         party_data: &[PartyData]
     ) -> Result<Vec<Option<PartyID>>, Self::SetPartiesError>;
