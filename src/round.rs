@@ -918,11 +918,7 @@ where
         trace!(target: "single-round",
                "trying to advance round");
 
-        if self
-            .round
-            .as_ref()
-            .is_none_or(|curr| curr.round.finished())
-        {
+        if self.round.as_ref().is_none_or(|curr| curr.round.finished()) {
             // Get the next round ID.
             match self.round_ids.next() {
                 Some(newid) => {
