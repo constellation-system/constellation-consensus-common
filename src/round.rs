@@ -1,4 +1,4 @@
-// Copyright © 2024 The Johns Hopkins Applied Physics Laboratory LLC.
+// Copyright © 2024-25 The Johns Hopkins Applied Physics Laboratory LLC.
 //
 // This program is free software: you can redistribute it and/or
 // modify it under the terms of the GNU Affero General Public License,
@@ -601,8 +601,10 @@ where
     Out: Outbound<RoundID, Msg>,
     Msg: RoundMsg<RoundID>
 {
-    type RecvError<ReportError> = WithMutexPoison<Inner::RecvError<ReportError>>
-    where ReportError: Display;
+    type RecvError<ReportError>
+        = WithMutexPoison<Inner::RecvError<ReportError>>
+    where
+        ReportError: Display;
 
     fn recv<Reporter>(
         &mut self,
@@ -916,11 +918,7 @@ where
         trace!(target: "single-round",
                "trying to advance round");
 
-        if self
-            .round
-            .as_ref()
-            .map_or(true, |curr| curr.round.finished())
-        {
+        if self.round.as_ref().is_none_or(|curr| curr.round.finished()) {
             // Get the next round ID.
             match self.round_ids.next() {
                 Some(newid) => {
@@ -1068,12 +1066,14 @@ where
     Out: Outbound<RoundIDs::Item, Msg>,
     Msg: RoundMsg<RoundIDs::Item>
 {
-    type RecvError<ReportError> = SingleRoundRecvError<
+    type RecvError<ReportError>
+        = SingleRoundRecvError<
         RoundIDs::Item,
         RecvError<Out::RecvError, ReportError>,
         PartyID
     >
-    where ReportError: Display;
+    where
+        ReportError: Display;
 
     fn recv<Reporter>(
         &mut self,

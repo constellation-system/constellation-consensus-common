@@ -8,3 +8,4 @@ guarantees at present.**
 
 * [Developer documentation for `devel` branch](https://constellation-system.github.io/constellation-consensus-common/index.html)
 * [Coverage reports for `devel` branch](https://constellation-system.github.io/constellation-consensus-common/coverage/index.html)
+* [Contribution guide](https://github.com/constellation-system/constellation-consensus-common/blob/devel/CONTRIBUTING.md)

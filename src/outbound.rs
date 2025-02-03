@@ -1,4 +1,4 @@
-// Copyright © 2024 The Johns Hopkins Applied Physics Laboratory LLC.
+// Copyright © 2024-25 The Johns Hopkins Applied Physics Laboratory LLC.
 //
 // This program is free software: you can redistribute it and/or
 // modify it under the terms of the GNU Affero General Public License,
@@ -190,8 +190,8 @@ where
     }
 }
 
-impl<'a, PartyID, Party> ExactSizeIterator
-    for OutboundGroupPartiesIter<'a, PartyID, Party>
+impl<PartyID, Party> ExactSizeIterator
+    for OutboundGroupPartiesIter<'_, PartyID, Party>
 where
     PartyID: Clone + From<usize> + Into<usize>,
     Party: Clone + Eq + Hash
@@ -202,8 +202,8 @@ where
     }
 }
 
-impl<'a, PartyID, Party> FusedIterator
-    for OutboundGroupPartiesIter<'a, PartyID, Party>
+impl<PartyID, Party> FusedIterator
+    for OutboundGroupPartiesIter<'_, PartyID, Party>
 where
     PartyID: Clone + From<usize> + Into<usize>,
     Party: Clone + Eq + Hash
