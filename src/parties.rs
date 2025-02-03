@@ -1,4 +1,4 @@
-// Copyright © 2024 The Johns Hopkins Applied Physics Laboratory LLC.
+// Copyright © 2024-25 The Johns Hopkins Applied Physics Laboratory LLC.
 //
 // This program is free software: you can redistribute it and/or
 // modify it under the terms of the GNU Affero General Public License,
@@ -287,7 +287,7 @@ where
     }
 }
 
-impl<'a, Party> FusedIterator for DynamicPartiesIter<'a, Party> where
+impl<Party> FusedIterator for DynamicPartiesIter<'_, Party> where
     Party: Clone + Eq + Hash
 {
 }
@@ -471,9 +471,11 @@ impl<Round, Party> Parties<Round, Party> for StaticParties<Party>
 where
     Party: Clone + Eq + Hash
 {
-    type PartiesIter<'a> = std::slice::Iter<'a, Party>
-    where Self: 'a,
-          Party: 'a;
+    type PartiesIter<'a>
+        = std::slice::Iter<'a, Party>
+    where
+        Self: 'a,
+        Party: 'a;
     type PartyRoundError = StaticPartiesError;
 
     #[inline]
@@ -589,9 +591,11 @@ where
     Party: Clone + Eq + Hash,
     Round: Clone + Eq + Hash
 {
-    type PartiesIter<'a> = DynamicPartiesIter<'a, Party>
-    where Self: 'a,
-          Party: 'a;
+    type PartiesIter<'a>
+        = DynamicPartiesIter<'a, Party>
+    where
+        Self: 'a,
+        Party: 'a;
     type PartyRoundError = DynamicPartiesError;
 
     fn start_party_at(
