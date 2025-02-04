@@ -20,7 +20,7 @@
 name = "constellation-consensus-common"
 description = "Common consensus protocol API for the Constellation distributed systems platform"
 repository = "https://github.com/constellation-system/constellation-consensus-common"
-vversion = "0.0.0"
+version = "0.0.0"
 authors = [ "Eric McCorkle <eric.mccorkle@jhuapl.edu>" ]
 rust-version = "1.83"
 license = "AGPL-3.0-only"
