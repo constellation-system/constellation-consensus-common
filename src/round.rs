@@ -26,6 +26,7 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::fmt::Display;
 use std::fmt::Error;
 use std::fmt::Formatter;
@@ -57,6 +58,7 @@ use crate::state::ProtoStateRound;
 use crate::state::ProtoStateSetParties;
 use crate::state::RoundResultReporter;
 use crate::state::RoundState;
+use crate::state::RoundStateRecv;
 use crate::state::RoundStateUpdate;
 
 /// Trait for messages that have a round ID embedded.
@@ -89,10 +91,18 @@ where
 /// Most protocol implementations do *not* need to provide their own
 /// implementations of this trait.
 pub trait Rounds {
+    /// Errors that can result from [recv](Rounds::recv).
+    type TimeUpdateError: Display;
+    // XXX Clear finished should also return an error.
+
     /// Clear out any rounds that have fully completed.
     ///
     /// This should drop any rounds that have been fully resolved.
     fn clear_finished(&mut self);
+
+    /// Perform any state updates related to elapsed real time.
+    fn time_update(&mut self)
+        -> Result<Option<Instant>, Self::TimeUpdateError>;
 }
 
 /// Subtrait of [Rounds] allowing advancement to the next round.
@@ -103,7 +113,9 @@ where
     type AdvanceError: Display;
 
     /// Advance to the next round.
-    fn advance(&mut self) -> Result<Option<RoundID>, Self::AdvanceError>;
+    fn advance(
+        &mut self
+    ) -> Result<Option<(RoundID, Option<Instant>)>, Self::AdvanceError>;
 }
 
 /// Subtrait of [Rounds] allowing an update to be applied to the round
@@ -245,7 +257,7 @@ where
 /// One round in a consensus protocol.
 struct Round<State, RoundID, Oper, Msg, Info, Out>
 where
-    State: RoundState<RoundID, Out::PartyID, Oper, Msg::Payload, Info, Out>,
+    State: RoundStateRecv<RoundID, Out::PartyID, Oper, Msg::Payload, Info, Out>,
     RoundID: Clone + Display + Ord,
     Out: Outbound<RoundID, Msg>,
     Msg: RoundMsg<RoundID> {
@@ -452,6 +464,8 @@ where
     Out: Outbound<RoundID, Msg>,
     Msg: RoundMsg<RoundID>
 {
+    type TimeUpdateError = WithMutexPoison<Inner::TimeUpdateError>;
+
     fn clear_finished(&mut self) {
         match self.inner.lock() {
             Ok(mut guard) => guard.clear_finished(),
@@ -460,6 +474,16 @@ where
                        "mutex poisoned in clear_finished");
             }
         }
+    }
+
+    fn time_update(
+        &mut self
+    ) -> Result<Option<Instant>, Self::TimeUpdateError> {
+        self.inner
+            .lock()
+            .map_err(|_| WithMutexPoison::MutexPoison)?
+            .time_update()
+            .map_err(|err| WithMutexPoison::Inner { error: err })
     }
 }
 
@@ -478,13 +502,12 @@ where
 {
     type AdvanceError = WithMutexPoison<Inner::AdvanceError>;
 
-    fn advance(&mut self) -> Result<Option<RoundID>, Self::AdvanceError> {
-        let mut guard = self
-            .inner
+    fn advance(
+        &mut self
+    ) -> Result<Option<(RoundID, Option<Instant>)>, Self::AdvanceError> {
+        self.inner
             .lock()
-            .map_err(|_| WithMutexPoison::MutexPoison)?;
-
-        guard
+            .map_err(|_| WithMutexPoison::MutexPoison)?
             .advance()
             .map_err(|err| WithMutexPoison::Inner { error: err })
     }
@@ -509,12 +532,9 @@ where
         &mut self,
         oper: Oper
     ) -> Result<(), Self::UpdateError> {
-        let mut guard = self
-            .inner
+        self.inner
             .lock()
-            .map_err(|_| WithMutexPoison::MutexPoison)?;
-
-        guard
+            .map_err(|_| WithMutexPoison::MutexPoison)?
             .update(oper)
             .map_err(|err| WithMutexPoison::Inner { error: err })
     }
@@ -614,12 +634,9 @@ where
     ) -> Result<(), Self::RecvError<Reporter::ReportError>>
     where
         Reporter: RoundResultReporter<RoundID, Oper> {
-        let mut guard = self
-            .inner
+        self.inner
             .lock()
-            .map_err(|_| WithMutexPoison::MutexPoison)?;
-
-        guard
+            .map_err(|_| WithMutexPoison::MutexPoison)?
             .recv(reporter, party, msg)
             .map_err(|err| WithMutexPoison::Inner { error: err })
     }
@@ -628,7 +645,7 @@ where
 impl<State, RoundID, Oper, Msg, Info, Out>
     Round<State, RoundID, Oper, Msg, Info, Out>
 where
-    State: RoundState<RoundID, Out::PartyID, Oper, Msg::Payload, Info, Out>,
+    State: RoundStateRecv<RoundID, Out::PartyID, Oper, Msg::Payload, Info, Out>,
     RoundID: Clone + Display + Ord,
     Out: Outbound<RoundID, Msg>,
     Msg: RoundMsg<RoundID>
@@ -888,9 +905,30 @@ where
     Out: Outbound<RoundIDs::Item, Msg>,
     Msg: RoundMsg<RoundIDs::Item>
 {
+    type TimeUpdateError = Infallible;
+
     fn clear_finished(&mut self) {
         self.send_backlog
             .retain(|(_, outbound)| !outbound.finished())
+    }
+
+    fn time_update(
+        &mut self
+    ) -> Result<Option<Instant>, Self::TimeUpdateError> {
+        if let Some(curr) = &mut self.round {
+            if let Some(state) = curr.round.state.take() {
+                let (new, deadline) =
+                    state.time_update(&mut curr.round.outbound);
+
+                curr.round.state = Some(new);
+
+                Ok(deadline)
+            } else {
+                Ok(None)
+            }
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -910,7 +948,7 @@ where
     fn advance(
         &mut self
     ) -> Result<
-        Option<RoundIDs::Item>,
+        Option<(RoundIDs::Item, Option<Instant>)>,
         SingleRoundAdvanceError<State::CreateRoundError>
     > {
         let round = &self.round;
@@ -937,7 +975,7 @@ where
                         })?;
 
                     round
-                        .map(|(round_state, info, outbound)| {
+                        .map(|(round_state, info, outbound, deadline)| {
                             let round = Round::new(info, round_state, outbound);
                             let curr = SingleRoundCurr {
                                 round_id: newid.clone(),
@@ -964,7 +1002,7 @@ where
                                "advanced to round {}",
                                newid);
 
-                            Ok(Some(newid))
+                            Ok(Some((newid, deadline)))
                         })
                         .unwrap_or(Ok(None))
                 }

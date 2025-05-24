@@ -31,8 +31,10 @@
 //! Per-round state refers to the protocol state-machine that manages
 //! an individual round.  Implementations of per-round state machines
 //! implement [RoundState].
+
 use std::fmt::Display;
 use std::hash::Hash;
+use std::time::Instant;
 
 use constellation_common::codec::Codec;
 
@@ -99,7 +101,7 @@ where
     Out: Outbound<RoundID, Msg>,
     Msg: RoundMsg<RoundID> {
     /// Type of round states.
-    type Round: RoundState<
+    type Round: RoundStateRecv<
         RoundID,
         Out::PartyID,
         Self::Oper,
@@ -116,14 +118,25 @@ where
     fn create_round(
         &mut self,
         parties: &PartyIDMap<Out::PartyID, PartyID>
-    ) -> Result<Option<(Self::Round, Self::Info, Out)>, Self::CreateRoundError>;
+    ) -> Result<
+        Option<(Self::Round, Self::Info, Out, Option<Instant>)>,
+        Self::CreateRoundError
+    >;
 }
 
 /// Per-round protocol state machine.
 ///
 /// This provides the interface for the core protocol state-machine
 /// for a single round.
-pub trait RoundState<RoundID, Party, Oper, Msg, Info, Out>: Sized {
+pub trait RoundState<Out>: Sized {
+    fn time_update(
+        self,
+        out: &mut Out
+    ) -> (Self, Option<Instant>);
+}
+
+pub trait RoundStateRecv<RoundID, Party, Oper, Msg, Info, Out>:
+    RoundState<Out> {
     /// Process a protocol message.
     fn recv(
         self,
