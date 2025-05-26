@@ -37,6 +37,7 @@ use std::hash::Hash;
 use std::time::Instant;
 
 use constellation_common::codec::Codec;
+use constellation_common::error::ScopedError;
 
 use crate::outbound::Outbound;
 use crate::parties::Parties;
@@ -68,6 +69,17 @@ pub trait ProtoState<RoundID, PartyID>: Sized {
     ) -> Result<(), Self::UpdateError>
     where
         P: Parties<RoundID, PartyID>;
+}
+
+pub trait ProtoStateSubmit<Elem> {
+    type SubmitError: Display + ScopedError;
+
+    fn submit_elems<I>(
+        &mut self,
+        elems: I
+    ) -> Result<(), Self::SubmitError>
+    where
+        I: Iterator<Item = Elem>;
 }
 
 /// Subtrait of [ProtoState] allowing inter-round protocol states to
@@ -102,13 +114,13 @@ where
     Msg: RoundMsg<RoundID> {
     /// Type of round states.
     type Round: RoundStateRecv<
-        RoundID,
-        Out::PartyID,
-        Self::Oper,
-        Msg::Payload,
-        Self::Info,
-        Out
-    >;
+            RoundID,
+            Out::PartyID,
+            Self::Oper,
+            Msg::Payload,
+            Self::Info,
+            Out
+        > + RoundStateNotify<Out, Self>;
     /// Type of non-mutable round state.
     type Info;
     /// Errors that can occur when creating a round state.
@@ -119,7 +131,7 @@ where
         &mut self,
         parties: &PartyIDMap<Out::PartyID, PartyID>
     ) -> Result<
-        Option<(Self::Round, Self::Info, Out, Option<Instant>)>,
+        (Self::Round, Self::Info, Out, Option<Instant>),
         Self::CreateRoundError
     >;
 }
@@ -133,6 +145,16 @@ pub trait RoundState<Out>: Sized {
         self,
         out: &mut Out
     ) -> (Self, Option<Instant>);
+}
+
+pub trait RoundStateNotify<Out, State>: Sized {
+    type NotifyError: Display + ScopedError;
+
+    fn notify_update(
+        self,
+        state: &mut State,
+        out: &mut Out
+    ) -> Result<Self, Self::NotifyError>;
 }
 
 pub trait RoundStateRecv<RoundID, Party, Oper, Msg, Info, Out>:

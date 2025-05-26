@@ -101,7 +101,7 @@ where
             PartyID,
             <Self::State as ProtoState<RoundIDs::Item, PartyID>>::Oper,
             Self::Msg
-        > + RoundsSetParties<RoundIDs::Item, PartyID, Party, PartyCodec>;
+        > + RoundsSetParties<Party, PartyCodec>;
     /// Protocol state machine.
     type State: ProtoStateSetParties<PartyID, Party, PartyCodec>
         + ProtoStateRound<RoundIDs::Item, PartyID, Self::Msg, Self::Out>

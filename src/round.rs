@@ -56,8 +56,10 @@ use crate::parties::StaticPartiesError;
 use crate::state::ProtoState;
 use crate::state::ProtoStateRound;
 use crate::state::ProtoStateSetParties;
+use crate::state::ProtoStateSubmit;
 use crate::state::RoundResultReporter;
 use crate::state::RoundState;
+use crate::state::RoundStateNotify;
 use crate::state::RoundStateRecv;
 use crate::state::RoundStateUpdate;
 
@@ -105,6 +107,17 @@ pub trait Rounds {
         -> Result<Option<Instant>, Self::TimeUpdateError>;
 }
 
+pub trait RoundsSubmit<Elem> {
+    type SubmitError: Display + ScopedError;
+
+    fn submit_elems<I>(
+        &mut self,
+        elems: I
+    ) -> Result<(), Self::SubmitError>
+    where
+        I: Iterator<Item = Elem>;
+}
+
 /// Subtrait of [Rounds] allowing advancement to the next round.
 pub trait RoundsAdvance<RoundID>: Rounds
 where
@@ -135,11 +148,8 @@ pub trait RoundsUpdate<Oper>: Rounds {
 ///
 /// Most protocol implementations do *not* need to provide their own
 /// implementations of this trait.
-pub trait RoundsSetParties<RoundID, PartyID, PartyData, C>:
-    RoundsAdvance<RoundID>
+pub trait RoundsSetParties<PartyData, C>
 where
-    RoundID: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash,
     PartyData: Clone + Eq + Hash,
     C: Codec<PartyData> {
     type SetPartiesError: Display;
@@ -331,6 +341,12 @@ pub enum SingleRoundAdvanceError<CreateRound> {
 }
 
 #[derive(Debug)]
+pub enum SingleRoundSubmitError<Submit, Notify> {
+    Submit { err: Submit },
+    Notify { err: Notify }
+}
+
+#[derive(Debug)]
 pub enum SharedRoundsError<Inner> {
     Inner { err: Inner },
     MutexPoison
@@ -418,6 +434,37 @@ where
     }
 }
 
+impl<Inner, RoundID, PartyID, Oper, Msg, Out, Elem> RoundsSubmit<Elem>
+    for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
+where
+    Inner: Rounds
+        + RoundsAdvance<RoundID>
+        + RoundsUpdate<Oper>
+        + RoundsSubmit<Elem>
+        + RoundsParties<RoundID, PartyID, Out::PartyID>
+        + RoundsRecv<RoundID, PartyID, Oper, Msg>
+        + SharedMsgs<PartyID, Msg>,
+    RoundID: Clone + Display + Ord,
+    PartyID: Clone + Display + Eq + Hash,
+    Out: Outbound<RoundID, Msg>,
+    Msg: RoundMsg<RoundID>
+{
+    type SubmitError = WithMutexPoison<Inner::SubmitError>;
+
+    fn submit_elems<I>(
+        &mut self,
+        elems: I
+    ) -> Result<(), Self::SubmitError>
+    where
+        I: Iterator<Item = Elem> {
+        self.inner
+            .lock()
+            .map_err(|_| WithMutexPoison::MutexPoison)?
+            .submit_elems(elems)
+            .map_err(|err| WithMutexPoison::Inner { error: err })
+    }
+}
+
 impl<Inner, RoundID, PartyID, Oper, Msg, Out> SharedMsgs<PartyID, Msg>
     for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
 where
@@ -440,12 +487,9 @@ where
         (Option<Vec<(Vec<PartyID>, Vec<Msg>)>>, Option<Instant>),
         Self::MsgsError
     > {
-        let mut guard = self
-            .inner
+        self.inner
             .lock()
-            .map_err(|_| WithMutexPoison::MutexPoison)?;
-
-        guard
+            .map_err(|_| WithMutexPoison::MutexPoison)?
             .msgs()
             .map_err(|err| WithMutexPoison::Inner { error: err })
     }
@@ -541,14 +585,14 @@ where
 }
 
 impl<Inner, RoundID, PartyID, Oper, Msg, Out, PartyData, C>
-    RoundsSetParties<RoundID, PartyID, PartyData, C>
+    RoundsSetParties<PartyData, C>
     for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
 where
     Inner: Rounds
         + RoundsAdvance<RoundID>
         + RoundsUpdate<Oper>
         + RoundsParties<RoundID, PartyID, Out::PartyID>
-        + RoundsSetParties<RoundID, PartyID, PartyData, C>
+        + RoundsSetParties<PartyData, C>
         + RoundsRecv<RoundID, PartyID, Oper, Msg>,
     RoundID: Clone + Display + Ord,
     PartyID: Clone + Display + Eq + Hash,
@@ -565,12 +609,9 @@ where
         self_party: PartyData,
         party_data: &[PartyData]
     ) -> Result<(), Self::SetPartiesError> {
-        let mut guard = self
-            .inner
+        self.inner
             .lock()
-            .map_err(|_| WithMutexPoison::MutexPoison)?;
-
-        guard
+            .map_err(|_| WithMutexPoison::MutexPoison)?
             .set_parties(codec, self_party, party_data)
             .map_err(|err| WithMutexPoison::Inner { error: err })
     }
@@ -791,6 +832,52 @@ where
     }
 }
 
+impl<State, RoundIDs, PartyID, Msg, Out, Elem> RoundsSubmit<Elem>
+    for SingleRound<State, RoundIDs, PartyID, Msg, Out>
+where
+    State: ProtoState<RoundIDs::Item, PartyID>
+        + ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>
+        + ProtoStateSubmit<Elem>,
+    RoundIDs: Iterator,
+    RoundIDs::Item: Clone + Display + Ord,
+    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize> + Ord,
+    Out: Outbound<RoundIDs::Item, Msg>,
+    Msg: Clone + RoundMsg<RoundIDs::Item>
+{
+    type SubmitError = SingleRoundSubmitError<
+        State::SubmitError,
+        <State::Round as RoundStateNotify<Out, State>>::NotifyError
+    >;
+
+    #[inline]
+    fn submit_elems<I>(
+        &mut self,
+        elems: I
+    ) -> Result<(), Self::SubmitError>
+    where
+        I: Iterator<Item = Elem> {
+        self.state
+            .submit_elems(elems)
+            .map_err(|err| SingleRoundSubmitError::Submit { err: err })?;
+
+        if let Some(curr) = &mut self.round {
+            // If the round exists, update it.
+
+            if let Some(state) = curr.round.state.take() {
+                let new = state
+                    .notify_update(&mut self.state, &mut curr.round.outbound)
+                    .map_err(|err| SingleRoundSubmitError::Notify {
+                        err: err
+                    })?;
+
+                curr.round.state = Some(new);
+            }
+        }
+
+        Ok(())
+    }
+}
+
 impl<State, RoundIDs, PartyID, Msg, Out> SharedMsgs<PartyID, Msg>
     for SingleRound<State, RoundIDs, PartyID, Msg, Out>
 where
@@ -915,7 +1002,10 @@ where
     fn time_update(
         &mut self
     ) -> Result<Option<Instant>, Self::TimeUpdateError> {
+        // Check if there is a current round.
         if let Some(curr) = &mut self.round {
+            // If the round exists, update it.
+
             if let Some(state) = curr.round.state.take() {
                 let (new, deadline) =
                     state.time_update(&mut curr.round.outbound);
@@ -969,42 +1059,36 @@ where
                         .parties_map(&round)
                         .expect("infallible error");
 
-                    let round =
+                    let (round_state, info, outbound, deadline) =
                         self.state.create_round(&party_map).map_err(|err| {
                             SingleRoundAdvanceError::CreateRound { err: err }
                         })?;
+                    let round = Round::new(info, round_state, outbound);
+                    let curr = SingleRoundCurr {
+                        round_id: newid.clone(),
+                        round: round
+                    };
 
-                    round
-                        .map(|(round_state, info, outbound, deadline)| {
-                            let round = Round::new(info, round_state, outbound);
-                            let curr = SingleRoundCurr {
-                                round_id: newid.clone(),
-                                round: round
-                            };
+                    if let Some(SingleRoundCurr { round, round_id }) =
+                        self.round.replace(curr)
+                    {
+                        let outbound = round.outbound;
 
-                            if let Some(SingleRoundCurr { round, round_id }) =
-                                self.round.replace(curr)
-                            {
-                                let outbound = round.outbound;
-
-                                // Hang on to the old outbound if it's still
-                                // going.
-                                if !outbound.finished() {
-                                    trace!(target: "single-round",
-                                       "retaining unfinished outbound buffer");
-
-                                    self.send_backlog
-                                        .push((round_id, outbound));
-                                }
-                            }
-
+                        // Hang on to the old outbound if it's still
+                        // going.
+                        if !outbound.finished() {
                             trace!(target: "single-round",
-                               "advanced to round {}",
-                               newid);
+                                   "retaining unfinished outbound buffer");
 
-                            Ok(Some((newid, deadline)))
-                        })
-                        .unwrap_or(Ok(None))
+                            self.send_backlog.push((round_id, outbound));
+                        }
+                    }
+
+                    trace!(target: "single-round",
+                           "advanced to round {}",
+                           newid);
+
+                    Ok(Some((newid, deadline)))
                 }
                 None => {
                     // IDs are exhausted.
@@ -1039,7 +1123,7 @@ where
 }
 
 impl<State, RoundIDs, PartyID, Msg, Out, PartyData, C>
-    RoundsSetParties<RoundIDs::Item, PartyID, PartyData, C>
+    RoundsSetParties<PartyData, C>
     for SingleRound<State, RoundIDs, PartyID, Msg, Out>
 where
     State: ProtoState<RoundIDs::Item, PartyID>
@@ -1168,6 +1252,19 @@ where
     }
 }
 
+impl<Submit, Notify> ScopedError for SingleRoundSubmitError<Submit, Notify>
+where
+    Submit: ScopedError,
+    Notify: ScopedError
+{
+    fn scope(&self) -> ErrorScope {
+        match self {
+            SingleRoundSubmitError::Submit { err } => err.scope(),
+            SingleRoundSubmitError::Notify { err } => err.scope()
+        }
+    }
+}
+
 impl<RoundID, Inner> ScopedError
     for SingleRoundCollectOutboundError<RoundID, Inner>
 where
@@ -1245,6 +1342,22 @@ where
             SingleRoundPartiesError::BadRound { round } => {
                 write!(f, "wrong round {}", round)
             }
+        }
+    }
+}
+
+impl<Submit, Notify> Display for SingleRoundSubmitError<Submit, Notify>
+where
+    Submit: Display,
+    Notify: Display
+{
+    fn fmt(
+        &self,
+        f: &mut Formatter<'_>
+    ) -> Result<(), Error> {
+        match self {
+            SingleRoundSubmitError::Submit { err } => err.fmt(f),
+            SingleRoundSubmitError::Notify { err } => err.fmt(f)
         }
     }
 }
