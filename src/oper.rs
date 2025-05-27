@@ -27,11 +27,6 @@ use log::debug;
 use log::error;
 use log::trace;
 
-pub enum OperBatchResult<H, T> {
-    Hashes(Vec<H>),
-    None(T)
-}
-
 /// Trait for consensus operations that possibly can be turned into a
 /// batch.
 pub trait OperBatch<H>: Sized
@@ -46,7 +41,7 @@ where
     fn take_batch(
         self,
         hash: &H
-    ) -> Result<OperBatchResult<H::HashID, Self>, Self::BatchError>;
+    ) -> Result<Option<Vec<H::HashID>>, Self::BatchError>;
 }
 
 pub struct OperBatches<H>
@@ -83,6 +78,11 @@ where
             pending: HashSet::with_capacity(size),
             queue: VecDeque::with_capacity(size)
         }
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty()
     }
 
     /// Insert a set of hashes into the structure.

@@ -65,7 +65,7 @@ pub trait ProtoState<RoundID, PartyID>: Sized {
     fn update<P>(
         &mut self,
         parties: &mut P,
-        oper: Self::Oper
+        oper: &Self::Oper
     ) -> Result<(), Self::UpdateError>
     where
         P: Parties<RoundID, PartyID>;

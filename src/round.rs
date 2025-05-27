@@ -140,7 +140,7 @@ pub trait RoundsUpdate<Oper>: Rounds {
     /// Update the inter-round state with `oper`.
     fn update(
         &mut self,
-        oper: Oper
+        oper: &Oper
     ) -> Result<(), Self::UpdateError>;
 }
 
@@ -574,7 +574,7 @@ where
 
     fn update(
         &mut self,
-        oper: Oper
+        oper: &Oper
     ) -> Result<(), Self::UpdateError> {
         self.inner
             .lock()
@@ -1116,7 +1116,7 @@ where
 
     fn update(
         &mut self,
-        oper: State::Oper
+        oper: &State::Oper
     ) -> Result<(), Self::UpdateError> {
         self.state.update(&mut self.parties, oper)
     }
