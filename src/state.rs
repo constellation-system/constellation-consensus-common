@@ -31,10 +31,13 @@
 //! Per-round state refers to the protocol state-machine that manages
 //! an individual round.  Implementations of per-round state machines
 //! implement [RoundState].
+
 use std::fmt::Display;
 use std::hash::Hash;
+use std::time::Instant;
 
 use constellation_common::codec::Codec;
+use constellation_common::error::ScopedError;
 
 use crate::outbound::Outbound;
 use crate::parties::Parties;
@@ -62,10 +65,21 @@ pub trait ProtoState<RoundID, PartyID>: Sized {
     fn update<P>(
         &mut self,
         parties: &mut P,
-        oper: Self::Oper
+        oper: &Self::Oper
     ) -> Result<(), Self::UpdateError>
     where
         P: Parties<RoundID, PartyID>;
+}
+
+pub trait ProtoStateSubmit<Elem> {
+    type SubmitError: Display + ScopedError;
+
+    fn submit_elems<I>(
+        &mut self,
+        elems: I
+    ) -> Result<(), Self::SubmitError>
+    where
+        I: Iterator<Item = Elem>;
 }
 
 /// Subtrait of [ProtoState] allowing inter-round protocol states to
@@ -99,14 +113,14 @@ where
     Out: Outbound<RoundID, Msg>,
     Msg: RoundMsg<RoundID> {
     /// Type of round states.
-    type Round: RoundState<
-        RoundID,
-        Out::PartyID,
-        Self::Oper,
-        Msg::Payload,
-        Self::Info,
-        Out
-    >;
+    type Round: RoundStateRecv<
+            RoundID,
+            Out::PartyID,
+            Self::Oper,
+            Msg::Payload,
+            Self::Info,
+            Out
+        > + RoundStateNotify<Out, Self>;
     /// Type of non-mutable round state.
     type Info;
     /// Errors that can occur when creating a round state.
@@ -116,14 +130,35 @@ where
     fn create_round(
         &mut self,
         parties: &PartyIDMap<Out::PartyID, PartyID>
-    ) -> Result<Option<(Self::Round, Self::Info, Out)>, Self::CreateRoundError>;
+    ) -> Result<
+        (Self::Round, Self::Info, Out, Option<Instant>),
+        Self::CreateRoundError
+    >;
 }
 
 /// Per-round protocol state machine.
 ///
 /// This provides the interface for the core protocol state-machine
 /// for a single round.
-pub trait RoundState<RoundID, Party, Oper, Msg, Info, Out>: Sized {
+pub trait RoundState<Out>: Sized {
+    fn time_update(
+        self,
+        out: &mut Out
+    ) -> (Self, Option<Instant>);
+}
+
+pub trait RoundStateNotify<Out, State>: Sized {
+    type NotifyError: Display + ScopedError;
+
+    fn notify_update(
+        self,
+        state: &mut State,
+        out: &mut Out
+    ) -> Result<Self, Self::NotifyError>;
+}
+
+pub trait RoundStateRecv<RoundID, Party, Oper, Msg, Info, Out>:
+    RoundState<Out> {
     /// Process a protocol message.
     fn recv(
         self,
