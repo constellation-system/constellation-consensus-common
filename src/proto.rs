@@ -36,7 +36,8 @@ use std::fmt::Display;
 use std::hash::Hash;
 use std::marker::PhantomData;
 
-use constellation_common::codec::Codec;
+use constellation_common::codec::Decoder;
+use constellation_common::codec::Encoder;
 
 use crate::outbound::Outbound;
 use crate::parties::PartiesMap;
@@ -59,7 +60,7 @@ use crate::state::ProtoStateSetParties;
 /// [ConsensusProtoRounds].
 pub trait ConsensusProto<Party, PartyCodec>: Sized
 where
-    PartyCodec: Codec<Party> {
+    PartyCodec: Decoder<Party> + Encoder<Party> {
     /// Type of configuration objects used to create the protocol.
     type Config: Default;
     /// Type of errors that can occur creating a protocol instance.
@@ -81,7 +82,7 @@ where
     PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
     Party: Clone + Display + Eq + Hash,
     P: PartiesMap<RoundIDs::Item, Self::RoundPartyIdx, PartyID>,
-    PartyCodec: Codec<Party> {
+    PartyCodec: Decoder<Party> + Encoder<Party> {
     /// Type of protocol messages.
     type Msg: RoundMsg<RoundIDs::Item>;
     /// Type of outbound message structures.
@@ -133,7 +134,7 @@ where
     PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
     Party: Clone + Display + Eq + Hash,
     P: PartiesMap<RoundIDs::Item, Inner::RoundPartyIdx, PartyID>,
-    PartyCodec: Codec<Party> {
+    PartyCodec: Decoder<Party> + Encoder<Party> {
     round_ids: PhantomData<RoundIDs>,
     party_id: PhantomData<PartyID>,
     party: PhantomData<Party>,
@@ -153,7 +154,7 @@ where
     PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
     Party: Clone + Display + Eq + Hash,
     P: PartiesMap<RoundIDs::Item, Inner::RoundPartyIdx, PartyID>,
-    PartyCodec: Codec<Party>
+    PartyCodec: Decoder<Party> + Encoder<Party>
 {
     type Config = Inner::Config;
     type CreateError = Inner::CreateError;
@@ -186,7 +187,7 @@ where
     PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
     Party: Clone + Display + Eq + Hash,
     P: PartiesMap<RoundIDs::Item, Inner::RoundPartyIdx, PartyID>,
-    PartyCodec: Codec<Party>
+    PartyCodec: Decoder<Party> + Encoder<Party>
 {
     type Msg = Inner::Msg;
     type Out = Inner::Out;

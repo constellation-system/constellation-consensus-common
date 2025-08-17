@@ -27,6 +27,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::fmt::Debug;
 use std::fmt::Display;
 use std::fmt::Error;
 use std::fmt::Formatter;
@@ -36,7 +37,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
 
-use constellation_common::codec::Codec;
+use constellation_common::codec::Decoder;
+use constellation_common::codec::Encoder;
 use constellation_common::error::ErrorScope;
 use constellation_common::error::ScopedError;
 use constellation_common::error::WithMutexPoison;
@@ -151,7 +153,7 @@ pub trait RoundsUpdate<Oper>: Rounds {
 pub trait RoundsSetParties<PartyData, C>
 where
     PartyData: Clone + Eq + Hash,
-    C: Codec<PartyData> {
+    C: Decoder<PartyData> + Encoder<PartyData> {
     type SetPartiesError: Display;
 
     fn set_parties(
@@ -461,7 +463,7 @@ where
             .lock()
             .map_err(|_| WithMutexPoison::MutexPoison)?
             .submit_elems(elems)
-            .map_err(|err| WithMutexPoison::Inner { error: err })
+            .map_err(|err| WithMutexPoison::Inner { err: err })
     }
 }
 
@@ -491,7 +493,7 @@ where
             .lock()
             .map_err(|_| WithMutexPoison::MutexPoison)?
             .msgs()
-            .map_err(|err| WithMutexPoison::Inner { error: err })
+            .map_err(|err| WithMutexPoison::Inner { err: err })
     }
 }
 
@@ -527,7 +529,7 @@ where
             .lock()
             .map_err(|_| WithMutexPoison::MutexPoison)?
             .time_update()
-            .map_err(|err| WithMutexPoison::Inner { error: err })
+            .map_err(|err| WithMutexPoison::Inner { err: err })
     }
 }
 
@@ -553,7 +555,7 @@ where
             .lock()
             .map_err(|_| WithMutexPoison::MutexPoison)?
             .advance()
-            .map_err(|err| WithMutexPoison::Inner { error: err })
+            .map_err(|err| WithMutexPoison::Inner { err: err })
     }
 }
 
@@ -580,7 +582,7 @@ where
             .lock()
             .map_err(|_| WithMutexPoison::MutexPoison)?
             .update(oper)
-            .map_err(|err| WithMutexPoison::Inner { error: err })
+            .map_err(|err| WithMutexPoison::Inner { err: err })
     }
 }
 
@@ -599,7 +601,7 @@ where
     Out: Outbound<RoundID, Msg>,
     Msg: RoundMsg<RoundID>,
     PartyData: Clone + Eq + Hash,
-    C: Codec<PartyData>
+    C: Decoder<PartyData> + Encoder<PartyData>
 {
     type SetPartiesError = WithMutexPoison<Inner::SetPartiesError>;
 
@@ -613,7 +615,7 @@ where
             .lock()
             .map_err(|_| WithMutexPoison::MutexPoison)?
             .set_parties(codec, self_party, party_data)
-            .map_err(|err| WithMutexPoison::Inner { error: err })
+            .map_err(|err| WithMutexPoison::Inner { err: err })
     }
 }
 
@@ -644,7 +646,7 @@ where
 
         guard
             .round_parties(round)
-            .map_err(|err| WithMutexPoison::Inner { error: err })
+            .map_err(|err| WithMutexPoison::Inner { err: err })
     }
 }
 
@@ -679,7 +681,7 @@ where
             .lock()
             .map_err(|_| WithMutexPoison::MutexPoison)?
             .recv(reporter, party, msg)
-            .map_err(|err| WithMutexPoison::Inner { error: err })
+            .map_err(|err| WithMutexPoison::Inner { err: err })
     }
 }
 
@@ -884,7 +886,7 @@ where
     State: ProtoState<RoundIDs::Item, PartyID>
         + ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>,
     RoundIDs: Iterator,
-    RoundIDs::Item: Clone + Display + Ord,
+    RoundIDs::Item: Clone + Debug + Display + Ord,
     PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize> + Ord,
     Out: Outbound<RoundIDs::Item, Msg>,
     Msg: Clone + RoundMsg<RoundIDs::Item>
@@ -1135,7 +1137,7 @@ where
     Out: Outbound<RoundIDs::Item, Msg>,
     Msg: RoundMsg<RoundIDs::Item>,
     PartyData: Clone + Eq + Hash,
-    C: Codec<PartyData>
+    C: Decoder<PartyData> + Encoder<PartyData>
 {
     type SetPartiesError = State::SetPartiesError;
 
@@ -1299,7 +1301,7 @@ where
     ) -> Result<(), Error> {
         match self {
             SingleRoundAdvanceError::CreateRound { err } => err.fmt(f),
-            SingleRoundAdvanceError::Parties { err } => err.fmt(f),
+            SingleRoundAdvanceError::Parties { err } => write!(f, "{}", err),
             SingleRoundAdvanceError::NotFinished => {
                 write!(f, "round not finished")
             }
@@ -1319,7 +1321,7 @@ where
     ) -> Result<(), Error> {
         match self {
             SingleRoundCreateError::CreateRound { err } => err.fmt(f),
-            SingleRoundCreateError::Parties { err } => err.fmt(f),
+            SingleRoundCreateError::Parties { err } => write!(f, "{}", err),
             SingleRoundCreateError::State { err } => err.fmt(f),
             SingleRoundCreateError::NoState => {
                 write!(f, "no initial state created")
@@ -1338,7 +1340,7 @@ where
         f: &mut Formatter<'_>
     ) -> Result<(), Error> {
         match self {
-            SingleRoundPartiesError::Parties { err } => err.fmt(f),
+            SingleRoundPartiesError::Parties { err } => write!(f, "{}", err),
             SingleRoundPartiesError::BadRound { round } => {
                 write!(f, "wrong round {}", round)
             }

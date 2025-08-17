@@ -26,6 +26,7 @@
 //!
 //! The [Outbound] trait represents objects that manage this
 //! retransmission and inbound message processing.
+use std::fmt::Debug;
 use std::fmt::Display;
 use std::hash::Hash;
 use std::iter::FusedIterator;
@@ -50,7 +51,7 @@ where
     type PartyID: Clone + Display + From<usize> + Into<usize>;
     /// Type of errors that can result from
     /// [collect_outbound](Outbound::collect_outbound).
-    type CollectOutboundError: Display + ScopedError;
+    type CollectOutboundError: Debug + Display + ScopedError;
     /// Type of errors that can result from [recv](Outbound::recv).
     type RecvError: Display;
     /// Type of configuration for creating instances.

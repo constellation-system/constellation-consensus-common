@@ -36,7 +36,8 @@ use std::fmt::Display;
 use std::hash::Hash;
 use std::time::Instant;
 
-use constellation_common::codec::Codec;
+use constellation_common::codec::Decoder;
+use constellation_common::codec::Encoder;
 use constellation_common::error::ScopedError;
 
 use crate::outbound::Outbound;
@@ -86,7 +87,7 @@ pub trait ProtoStateSubmit<Elem> {
 /// be created from a configuration object.
 pub trait ProtoStateSetParties<PartyID, PartyData, C>
 where
-    C: Codec<PartyData>,
+    C: Decoder<PartyData> + Encoder<PartyData>,
     PartyID: Clone + Display + Eq + Hash + Into<usize> {
     /// Type of errors that can occur creating a `ProtoState`.
     type SetPartiesError: Display;
