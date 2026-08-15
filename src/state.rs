@@ -33,23 +33,22 @@
 //! implement [RoundState].
 
 use std::fmt::Display;
-use std::hash::Hash;
 use std::time::Instant;
 
-use constellation_common::codec::Decoder;
-use constellation_common::codec::Encoder;
 use constellation_common::error::ScopedError;
 
 use crate::outbound::Outbound;
 use crate::parties::Parties;
-use crate::parties::PartyIDMap;
+use crate::parties::PartyRoundIDMap;
 use crate::round::RoundMsg;
+use crate::types::PartyTypes;
 
 /// Trait for inter-round protocol states.
 ///
 /// This trait allows protocol-specific state to be persisted between
 /// rounds and to be updated with the results of a round.
-pub trait ProtoState<RoundID, PartyID>: Sized {
+pub trait ProtoState<Types>: Sized
+where Types: PartyTypes {
     /// Configuration for creating states.
     type Config;
     /// Type of state-update operations.
@@ -69,7 +68,7 @@ pub trait ProtoState<RoundID, PartyID>: Sized {
         oper: &Self::Oper
     ) -> Result<(), Self::UpdateError>
     where
-        P: Parties<RoundID, PartyID>;
+        P: Parties<Types>;
 }
 
 pub trait ProtoStateSubmit<Elem> {
@@ -85,10 +84,9 @@ pub trait ProtoStateSubmit<Elem> {
 
 /// Subtrait of [ProtoState] allowing inter-round protocol states to
 /// be created from a configuration object.
-pub trait ProtoStateSetParties<PartyID, PartyData, C>
+pub trait ProtoStateSetParties<Types>
 where
-    C: Decoder<PartyData> + Encoder<PartyData>,
-    PartyID: Clone + Display + Eq + Hash + Into<usize> {
+    Types: PartyTypes {
     /// Type of errors that can occur creating a `ProtoState`.
     type SetPartiesError: Display;
 
@@ -98,24 +96,22 @@ where
     /// or `None` if the new ID is freshly-created.
     fn set_parties(
         &mut self,
-        codec: C,
-        self_party: PartyData,
-        party_data: &[PartyData]
-    ) -> Result<Vec<Option<PartyID>>, Self::SetPartiesError>;
+        codec: Types::PartyCodec,
+        self_party: Types::Party,
+        party_data: &[Types::Party]
+    ) -> Result<Vec<Option<Types::PartyID>>, Self::SetPartiesError>;
 }
 
 /// Subtrait of [ProtoState] allowing individual round states to be
 /// created.
-pub trait ProtoStateRound<RoundID, PartyID, Msg, Out>:
-    ProtoState<RoundID, PartyID>
+pub trait ProtoStateRound<Types, Msg, Out>: ProtoState<Types>
 where
-    PartyID: Clone + Eq + Hash + From<usize> + Into<usize>,
-    RoundID: Clone + Display + Ord,
-    Out: Outbound<RoundID, Msg>,
-    Msg: RoundMsg<RoundID> {
+    Types: PartyTypes,
+    Out: Outbound<Types::RoundID, Msg, PartyID = Types::PartyRoundIdx>,
+    Msg: RoundMsg<Types::RoundID> {
     /// Type of round states.
     type Round: RoundStateRecv<
-            RoundID,
+            Types::RoundID,
             Out::PartyID,
             Self::Oper,
             Msg::Payload,
@@ -130,7 +126,7 @@ where
     /// Create a new round state and outbound message buffer.
     fn create_round(
         &mut self,
-        parties: &PartyIDMap<Out::PartyID, PartyID>
+        parties: &PartyRoundIDMap<Types>
     ) -> Result<
         (Self::Round, Self::Info, Out, Option<Instant>),
         Self::CreateRoundError

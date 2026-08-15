@@ -22,14 +22,13 @@ description = "Common consensus protocol API for the Constellation distributed s
 repository = "https://github.com/constellation-system/constellation-consensus-common"
 version = "0.0.0"
 authors = [ "Eric McCorkle <eric.mccorkle@jhuapl.edu>" ]
-rust-version = "1.83"
+edition = "2024"
 license = "AGPL-3.0-only"
 keywords = ["networking", "distributed systems", "consensus"]
 categories = ["network-programming"]
 exclude = [
     ".gitignore"
 ]
-edition = "2018"
 
 [features]
 default = ["gssapi", "log", "openssl", "unix"]
@@ -60,4 +59,4 @@ serde = { version = "1.0", features = ["derive"] }
 
 [dev-dependencies]
 env_logger = { version = "0.10" }
-serde_yaml = { version = "0.9" }
+yaml_serde = { version = "0.10" }

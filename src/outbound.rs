@@ -39,6 +39,7 @@ use constellation_common::error::ScopedError;
 
 use crate::parties::PartyIDMap;
 use crate::round::RoundMsg;
+use crate::types::PartyTypes;
 
 /// Trait for outbound message buffers.
 ///
@@ -100,12 +101,11 @@ pub struct OutboundGroup<Msg> {
 }
 
 /// Iterator over recipients for an [OutboundGroup].
-pub struct OutboundGroupPartiesIter<'a, PartyID, Party>
+pub struct OutboundGroupPartiesIter<'a, P>
 where
-    PartyID: Clone + From<usize> + Into<usize>,
-    Party: Clone + Eq + Hash {
+    P: PartyTypes {
     /// The [PartyIDMap] for the round from which this group originates.
-    party_map: &'a PartyIDMap<PartyID, Party>,
+    party_map: &'a PartyIDMap<P>,
     /// Iterator over the parties to which to send the message.
     parties: IterOnes<'a, usize, Lsb0>
 }
@@ -131,13 +131,12 @@ impl<Msg> OutboundGroup<Msg> {
     /// Get an iterator over all the parties to which the message
     /// needs to be sent.
     #[inline]
-    pub fn iter<'a, PartyID, Party>(
+    pub fn iter<'a, P>(
         &'a self,
-        parties: &'a PartyIDMap<PartyID, Party>
-    ) -> OutboundGroupPartiesIter<'a, PartyID, Party>
+        parties: &'a PartyIDMap<P>
+    ) -> OutboundGroupPartiesIter<'a, P>
     where
-        PartyID: Clone + From<usize> + Into<usize>,
-        Party: Clone + Eq + Hash {
+        P: PartyTypes {
         OutboundGroupPartiesIter {
             parties: self.parties.iter_ones(),
             party_map: parties
@@ -145,16 +144,14 @@ impl<Msg> OutboundGroup<Msg> {
     }
 }
 
-impl<'a, PartyID, Party> Iterator
-    for OutboundGroupPartiesIter<'a, PartyID, Party>
+impl<'a, P> Iterator for OutboundGroupPartiesIter<'a, P>
 where
-    PartyID: Clone + From<usize> + Into<usize>,
-    Party: Clone + Eq + Hash
+    P: PartyTypes,
 {
-    type Item = &'a Party;
+    type Item = &'a P::Party;
 
     #[inline]
-    fn next(&mut self) -> Option<&'a Party> {
+    fn next(&mut self) -> Option<&'a P::Party> {
         match self.parties.next() {
             Some(idx) => self.party_map.idx_party(idx),
             None => None
@@ -175,7 +172,7 @@ where
     fn nth(
         &mut self,
         n: usize
-    ) -> Option<&'a Party> {
+    ) -> Option<&'a P::Party> {
         match self.parties.nth(n) {
             Some(idx) => self.party_map.idx_party(idx),
             None => None
@@ -183,7 +180,7 @@ where
     }
 
     #[inline]
-    fn last(self) -> Option<&'a Party> {
+    fn last(self) -> Option<&'a P::Party> {
         match self.parties.last() {
             Some(idx) => self.party_map.idx_party(idx),
             None => None
@@ -191,11 +188,10 @@ where
     }
 }
 
-impl<PartyID, Party> ExactSizeIterator
-    for OutboundGroupPartiesIter<'_, PartyID, Party>
+impl<P> ExactSizeIterator
+    for OutboundGroupPartiesIter<'_, P>
 where
-    PartyID: Clone + From<usize> + Into<usize>,
-    Party: Clone + Eq + Hash
+    P: PartyTypes
 {
     #[inline]
     fn len(&self) -> usize {
@@ -203,10 +199,9 @@ where
     }
 }
 
-impl<PartyID, Party> FusedIterator
-    for OutboundGroupPartiesIter<'_, PartyID, Party>
+impl<P> FusedIterator
+    for OutboundGroupPartiesIter<'_, P>
 where
-    PartyID: Clone + From<usize> + Into<usize>,
-    Party: Clone + Eq + Hash
+    P: PartyTypes
 {
 }

@@ -53,6 +53,7 @@ use crate::parties::PartiesMap;
 use crate::parties::PartiesRounds;
 use crate::parties::PartiesUpdate;
 use crate::parties::PartyIDMap;
+use crate::parties::PartyRoundIDMap;
 use crate::parties::StaticParties;
 use crate::parties::StaticPartiesError;
 use crate::state::ProtoState;
@@ -64,8 +65,16 @@ use crate::state::RoundState;
 use crate::state::RoundStateNotify;
 use crate::state::RoundStateRecv;
 use crate::state::RoundStateUpdate;
+use crate::types::PartyTypes;
+use crate::types::ProtoMsgTypes;
+use crate::types::RoundIDGenTypes;
+use crate::types::RoundPartyIDTypes;
 
 /// Trait for messages that have a round ID embedded.
+///
+/// # Type Parameters
+///
+/// - `RoundID`: Type of round IDs.
 pub trait RoundMsg<RoundID>
 where
     RoundID: Clone + Display + Ord {
@@ -105,8 +114,9 @@ pub trait Rounds {
     fn clear_finished(&mut self);
 
     /// Perform any state updates related to elapsed real time.
-    fn time_update(&mut self)
-        -> Result<Option<Instant>, Self::TimeUpdateError>;
+    fn time_update(
+        &mut self
+    ) -> Result<Option<Instant>, Self::TimeUpdateError>;
 }
 
 pub trait RoundsSubmit<Elem> {
@@ -146,21 +156,27 @@ pub trait RoundsUpdate<Oper>: Rounds {
     ) -> Result<(), Self::UpdateError>;
 }
 
-/// Trait for objects that manage consensus rounds.
+/// Trait for objects that manage the set of parties for a consensus
+/// round.
 ///
 /// Most protocol implementations do *not* need to provide their own
 /// implementations of this trait.
-pub trait RoundsSetParties<PartyData, C>
+///
+/// # Type Parameters
+///
+/// - `Party`: Type of full party descriptions.
+///
+/// - `Codec`: Type of [Encoder]s and [Decoder]s for party data.
+pub trait RoundsSetParties<Types>
 where
-    PartyData: Clone + Eq + Hash,
-    C: Decoder<PartyData> + Encoder<PartyData> {
+    Types: PartyTypes {
     type SetPartiesError: Display;
 
     fn set_parties(
         &mut self,
-        codec: C,
-        self_party: PartyData,
-        party_data: &[PartyData]
+        codec: Types::PartyCodec,
+        self_party: Types::Party,
+        party_data: &[Types::Party]
     ) -> Result<(), Self::SetPartiesError>;
 }
 
@@ -172,12 +188,10 @@ where
 /// a given round may vary over time, as parties are added or removed
 /// from the pool.  Thus, it is necessary to maintain a mapping from
 /// "permanent" party IDs to per-round party IDs.
-pub trait RoundsParties<RoundID, PartyID, PartyRoundID>:
-    RoundsAdvance<RoundID>
+pub trait RoundsParties<Types>:
+    RoundsAdvance<Types::RoundID>
 where
-    RoundID: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash,
-    PartyRoundID: Clone + Display + From<usize> + Into<usize> {
+    Types: RoundPartyIDTypes {
     /// Errors can occur getting active parties.
     type PartiesError: Display;
 
@@ -186,16 +200,14 @@ where
     /// This maps permanent party IDs to per-round party IDs.
     fn round_parties(
         &self,
-        round: &RoundID
-    ) -> Result<PartyIDMap<PartyRoundID, PartyID>, Self::PartiesError>;
+        round: &Types::RoundID
+    ) -> Result<PartyRoundIDMap<Types>, Self::PartiesError>;
 }
 
-pub trait RoundsRecv<RoundID, PartyID, Oper, Msg>:
-    RoundsAdvance<RoundID> + RoundsUpdate<Oper>
+pub trait RoundsRecv<Types>:
+    RoundsAdvance<Types::RoundID> + RoundsUpdate<Types::Oper>
 where
-    RoundID: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash,
-    Msg: RoundMsg<RoundID> {
+    Types: ProtoMsgTypes {
     /// Errors that can result from [recv](Rounds::recv).
     type RecvError<ReportError>: Display
     where
@@ -208,11 +220,11 @@ where
     fn recv<Reporter>(
         &mut self,
         reporter: &mut Reporter,
-        party: &PartyID,
-        msg: Msg
+        party: &Types::PartyID,
+        msg: Types::Msg
     ) -> Result<(), Self::RecvError<Reporter::ReportError>>
     where
-        Reporter: RoundResultReporter<RoundID, Oper>;
+        Reporter: RoundResultReporter<Types::RoundID, Types::Oper>;
 }
 
 /// Thread-safe wrapper around a [Rounds] implementation.
@@ -235,35 +247,31 @@ where
     inner: Arc<Mutex<Inner>>
 }
 
-struct SingleRoundCurr<State, RoundIDs, PartyID, Msg, Out>
+struct SingleRoundCurr<State, T, Msg, Out>
 where
-    State: ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>,
-    RoundIDs: Iterator,
-    RoundIDs::Item: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
-    Out: Outbound<RoundIDs::Item, Msg>,
-    Msg: RoundMsg<RoundIDs::Item> {
+    T: PartyTypes,
+    State: ProtoStateRound<T, Msg, Out>,
+    Out: Outbound<T::RoundID, Msg>,
+    Msg: RoundMsg<T::RoundID> {
     round:
-        Round<State::Round, RoundIDs::Item, State::Oper, Msg, State::Info, Out>,
-    round_id: RoundIDs::Item
+        Round<State::Round, T::RoundID, State::Oper, Msg, State::Info, Out>,
+    round_id: T::RoundID
 }
 
 /// A [Rounds] instance that only tracks a single round.
 ///
 /// This is intended for simple examples and testing.
-pub struct SingleRound<State, RoundIDs, PartyID, Msg, Out>
+pub struct SingleRound<State, T, Msg, Out>
 where
-    State: ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>,
-    RoundIDs: Iterator,
-    RoundIDs::Item: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
-    Out: Outbound<RoundIDs::Item, Msg>,
-    Msg: RoundMsg<RoundIDs::Item> {
+    T: PartyTypes + RoundIDGenTypes,
+    State: ProtoStateRound<T, Msg, Out>,
+    Out: Outbound<T::RoundID, Msg>,
+    Msg: RoundMsg<T::RoundID> {
     state: State,
-    round_ids: RoundIDs,
-    send_backlog: Vec<(RoundIDs::Item, Out)>,
-    parties: StaticParties<PartyID>,
-    round: Option<SingleRoundCurr<State, RoundIDs, PartyID, Msg, Out>>
+    round_ids: T::RoundIDs,
+    send_backlog: Vec<(T::RoundID, Out)>,
+    parties: StaticParties<T::PartyID>,
+    round: Option<SingleRoundCurr<State, T, Msg, Out>>
 }
 
 /// One round in a consensus protocol.
@@ -777,19 +785,16 @@ where
     }
 }
 
-impl<State, RoundIDs, PartyID, Msg, Out>
-    SingleRound<State, RoundIDs, PartyID, Msg, Out>
+impl<State, T, Msg, Out>
+    SingleRound<State, T, Msg, Out>
 where
-    State: ProtoState<RoundIDs::Item, PartyID>
-        + ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>,
-    RoundIDs: Iterator,
-    RoundIDs::Item: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize> + Ord,
-    Out: Outbound<RoundIDs::Item, Msg>,
-    Msg: Clone + RoundMsg<RoundIDs::Item>
+    State: ProtoState<T> + ProtoStateRound<T, Msg, Out>,
+    T: PartyTypes + RoundIDGenTypes,
+    Out: Outbound<T::RoundID, Msg>,
+    Msg: Clone + RoundMsg<T::RoundID>
 {
     pub fn create(
-        round_ids: RoundIDs,
+        round_ids: T::RoundIDs,
         round_config: SingleRoundConfig<State::Config>
     ) -> Result<
         Self,
@@ -814,11 +819,11 @@ where
     }
 
     fn collect_outbound_msgs(
-        group_map: &mut HashMap<Vec<PartyID>, Vec<Msg>>,
+        group_map: &mut HashMap<Vec<T::PartyID>, Vec<Msg>>,
         parties_map: &PartyIDMap<Out::PartyID, PartyID>,
         group: OutboundGroup<Msg>
     ) {
-        let mut party_idxs: Vec<PartyID> =
+        let mut party_idxs: Vec<T::PartyID> =
             group.iter(parties_map).cloned().collect();
 
         party_idxs.sort();
@@ -834,17 +839,15 @@ where
     }
 }
 
-impl<State, RoundIDs, PartyID, Msg, Out, Elem> RoundsSubmit<Elem>
-    for SingleRound<State, RoundIDs, PartyID, Msg, Out>
+impl<State, T, Msg, Out, Elem> RoundsSubmit<Elem>
+    for SingleRound<State, T, Msg, Out>
 where
-    State: ProtoState<RoundIDs::Item, PartyID>
-        + ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>
+    State: ProtoState<T>
+        + ProtoStateRound<T, Msg, Out>
         + ProtoStateSubmit<Elem>,
-    RoundIDs: Iterator,
-    RoundIDs::Item: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize> + Ord,
-    Out: Outbound<RoundIDs::Item, Msg>,
-    Msg: Clone + RoundMsg<RoundIDs::Item>
+    T: PartyTypes + RoundIDGenTypes,
+    Out: Outbound<T::RoundID, Msg>,
+    Msg: Clone + RoundMsg<T::RoundID>
 {
     type SubmitError = SingleRoundSubmitError<
         State::SubmitError,
@@ -880,26 +883,23 @@ where
     }
 }
 
-impl<State, RoundIDs, PartyID, Msg, Out> SharedMsgs<PartyID, Msg>
-    for SingleRound<State, RoundIDs, PartyID, Msg, Out>
+impl<State, T, Msg, Out> SharedMsgs<T::PartyID, Msg>
+    for SingleRound<State, T, Msg, Out>
 where
-    State: ProtoState<RoundIDs::Item, PartyID>
-        + ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>,
-    RoundIDs: Iterator,
-    RoundIDs::Item: Clone + Debug + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize> + Ord,
-    Out: Outbound<RoundIDs::Item, Msg>,
-    Msg: Clone + RoundMsg<RoundIDs::Item>
+    State: ProtoState<T> + ProtoStateRound<T, Msg, Out>,
+    T: PartyTypes + RoundIDGenTypes,
+    Out: Outbound<T::RoundID, Msg>,
+    Msg: Clone + RoundMsg<T::RoundID>
 {
     type MsgsError = SingleRoundCollectOutboundError<
-        RoundIDs::Item,
+        T::RoundID,
         Out::CollectOutboundError
     >;
 
     fn msgs(
         &mut self
     ) -> Result<
-        (Option<Vec<(Vec<PartyID>, Vec<Msg>)>>, Option<Instant>),
+        (Option<Vec<(Vec<T::PartyID>, Vec<Msg>)>>, Option<Instant>),
         Self::MsgsError
     > {
         let mut group_map = HashMap::new();
@@ -983,16 +983,12 @@ where
     }
 }
 
-impl<State, RoundIDs, PartyID, Msg, Out> Rounds
-    for SingleRound<State, RoundIDs, PartyID, Msg, Out>
+impl<State, T, Msg, Out> Rounds for SingleRound<State, T, Msg, Out>
 where
-    State: ProtoState<RoundIDs::Item, PartyID>
-        + ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>,
-    RoundIDs: Iterator,
-    RoundIDs::Item: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
-    Out: Outbound<RoundIDs::Item, Msg>,
-    Msg: RoundMsg<RoundIDs::Item>
+    State: ProtoState<T> + ProtoStateRound<T, Msg, Out>,
+    T: PartyTypes + RoundIDGenTypes,
+    Out: Outbound<T::RoundID, Msg>,
+    Msg: RoundMsg<T::RoundID>
 {
     type TimeUpdateError = Infallible;
 
@@ -1024,23 +1020,20 @@ where
     }
 }
 
-impl<State, RoundIDs, PartyID, Msg, Out> RoundsAdvance<RoundIDs::Item>
-    for SingleRound<State, RoundIDs, PartyID, Msg, Out>
+impl<State, T, Msg, Out> RoundsAdvance<T::RoundID>
+    for SingleRound<State, T, Msg, Out>
 where
-    State: ProtoState<RoundIDs::Item, PartyID>
-        + ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>,
-    RoundIDs: Iterator,
-    RoundIDs::Item: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
-    Out: Outbound<RoundIDs::Item, Msg>,
-    Msg: RoundMsg<RoundIDs::Item>
+    State: ProtoState<T> + ProtoStateRound<T, Msg, Out>,
+    T: PartyTypes + RoundIDGenTypes,
+    Out: Outbound<T::RoundID, Msg>,
+    Msg: RoundMsg<T::RoundID>
 {
     type AdvanceError = SingleRoundAdvanceError<State::CreateRoundError>;
 
     fn advance(
         &mut self
     ) -> Result<
-        Option<(RoundIDs::Item, Option<Instant>)>,
+        Option<(T::RoundID, Option<Instant>)>,
         SingleRoundAdvanceError<State::CreateRoundError>
     > {
         let round = &self.round;
@@ -1103,16 +1096,13 @@ where
     }
 }
 
-impl<State, RoundIDs, PartyID, Msg, Out> RoundsUpdate<State::Oper>
-    for SingleRound<State, RoundIDs, PartyID, Msg, Out>
+impl<State, T, Msg, Out> RoundsUpdate<State::Oper>
+    for SingleRound<State, T, Msg, Out>
 where
-    State: ProtoState<RoundIDs::Item, PartyID>
-        + ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>,
-    RoundIDs: Iterator,
-    RoundIDs::Item: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
-    Out: Outbound<RoundIDs::Item, Msg>,
-    Msg: RoundMsg<RoundIDs::Item>
+    State: ProtoState<T> + ProtoStateRound<T, Msg, Out>,
+    T: PartyTypes + RoundIDGenTypes,
+    Out: Outbound<T::RoundID, Msg>,
+    Msg: RoundMsg<T::RoundID>
 {
     type UpdateError = State::UpdateError;
 
@@ -1124,31 +1114,29 @@ where
     }
 }
 
-impl<State, RoundIDs, PartyID, Msg, Out, PartyData, C>
-    RoundsSetParties<PartyData, C>
-    for SingleRound<State, RoundIDs, PartyID, Msg, Out>
+impl<State, RoundIDs, Msg, Out, P>
+    RoundsSetParties<P::Party, P::PartyCodec>
+    for SingleRound<State, RoundIDs, P::PartyID, Msg, Out>
 where
-    State: ProtoState<RoundIDs::Item, PartyID>
-        + ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>
-        + ProtoStateSetParties<PartyID, PartyData, C>,
+    State: ProtoState<RoundIDs::Item, P::PartyID>
+        + ProtoStateRound<RoundIDs::Item, P::PartyID, Msg, Out>
+        + ProtoStateSetParties<P>,
     RoundIDs: Iterator,
     RoundIDs::Item: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
     Out: Outbound<RoundIDs::Item, Msg>,
     Msg: RoundMsg<RoundIDs::Item>,
-    PartyData: Clone + Eq + Hash,
-    C: Decoder<PartyData> + Encoder<PartyData>
+    P: PartyTypes,
 {
     type SetPartiesError = State::SetPartiesError;
 
     fn set_parties(
         &mut self,
-        codec: C,
-        self_party: PartyData,
-        party_data: &[PartyData]
+        codec: P::PartyCodec,
+        self_party: P::Party,
+        party_data: &[P::Party]
     ) -> Result<(), Self::SetPartiesError> {
         let remap = self.state.set_parties(codec, self_party, party_data)?;
-        let parties = (0..party_data.len()).map(PartyID::from).collect();
+        let parties = (0..party_data.len()).map(P::PartyID::from).collect();
 
         self.parties.update_parties(parties, &remap);
 
@@ -1156,45 +1144,36 @@ where
     }
 }
 
-impl<State, RoundIDs, PartyID, Msg, Out>
-    RoundsParties<RoundIDs::Item, PartyID, Out::PartyID>
-    for SingleRound<State, RoundIDs, PartyID, Msg, Out>
+impl<State, T, Msg, Out> RoundsParties<T>
+    for SingleRound<State, T, Msg, Out>
 where
-    State: ProtoState<RoundIDs::Item, PartyID>
-        + ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>,
-    RoundIDs: Iterator,
-    RoundIDs::Item: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
-    Out: Outbound<RoundIDs::Item, Msg>,
-    Msg: RoundMsg<RoundIDs::Item>
+    State: ProtoState<T> + ProtoStateRound<T, Msg, Out>,
+    T: PartyTypes + RoundIDGenTypes,
+    Out: Outbound<T::RoundID, Msg>,
+    Msg: RoundMsg<T::RoundID>
 {
-    type PartiesError = SingleRoundPartiesError<RoundIDs::Item>;
+    type PartiesError = SingleRoundPartiesError<T::RoundID>;
 
     fn round_parties(
         &self,
-        round: &RoundIDs::Item
+        round: &T::RoundID
     ) -> Result<PartyIDMap<Out::PartyID, PartyID>, Self::PartiesError> {
         Ok(self.parties.parties_map(round).expect("infallible error"))
     }
 }
 
-impl<State, RoundIDs, PartyID, Msg, Out>
-    RoundsRecv<RoundIDs::Item, PartyID, State::Oper, Msg>
-    for SingleRound<State, RoundIDs, PartyID, Msg, Out>
+impl<State, T, Msg, Out> RoundsRecv<T, State::Oper, Msg>
+    for SingleRound<State, T, Msg, Out>
 where
-    State: ProtoState<RoundIDs::Item, PartyID>
-        + ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>,
-    RoundIDs: Iterator,
-    RoundIDs::Item: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
-    Out: Outbound<RoundIDs::Item, Msg>,
-    Msg: RoundMsg<RoundIDs::Item>
+    State: ProtoState<T> + ProtoStateRound<T, Msg, Out>,
+    T: PartyTypes + RoundIDGenTypes,
+    Out: Outbound<T::RoundID, Msg>,
+    Msg: RoundMsg<T::RoundID>
 {
-    type RecvError<ReportError>
-        = SingleRoundRecvError<
-        RoundIDs::Item,
+    type RecvError<ReportError> = SingleRoundRecvError<
+        T::RoundID,
         RecvError<Out::RecvError, ReportError>,
-        PartyID
+        T::PartyID
     >
     where
         ReportError: Display;
@@ -1202,11 +1181,11 @@ where
     fn recv<Reporter>(
         &mut self,
         reporter: &mut Reporter,
-        party: &PartyID,
+        party: &T::PartyID,
         msg: Msg
     ) -> Result<(), Self::RecvError<Reporter::ReportError>>
     where
-        Reporter: RoundResultReporter<RoundIDs::Item, State::Oper> {
+        Reporter: RoundResultReporter<T::RoundID, State::Oper> {
         // Get the round ID from the message.
         let (target_id, payload) = msg.take();
         // Get the party map to convert the party to the round-specific ID.

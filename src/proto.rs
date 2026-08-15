@@ -33,7 +33,6 @@
 //!  - A protocol state machine (see [ProtoState]), which will be used as
 //!    [ConsensusProtoRounds::State].
 use std::fmt::Display;
-use std::hash::Hash;
 use std::marker::PhantomData;
 
 use constellation_common::codec::Decoder;
@@ -52,6 +51,7 @@ use crate::round::SharedRounds;
 use crate::state::ProtoState;
 use crate::state::ProtoStateRound;
 use crate::state::ProtoStateSetParties;
+use crate::types::PartyTypes;
 
 /// Base trait for consensus protocol implementations.
 ///
@@ -74,15 +74,13 @@ where
 }
 
 /// Base trait for all consensus protocol implementations.
-pub trait ConsensusProtoRounds<RoundIDs, PartyID, Party, PartyCodec, P>:
-    ConsensusProto<Party, PartyCodec>
+pub trait ConsensusProtoRounds<RoundIDs, Map, P>:
+    ConsensusProto<P::Party, P::PartyCodec>
 where
     RoundIDs: Iterator,
     RoundIDs::Item: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
-    Party: Clone + Display + Eq + Hash,
-    P: PartiesMap<RoundIDs::Item, Self::RoundPartyIdx, PartyID>,
-    PartyCodec: Decoder<Party> + Encoder<Party> {
+    P: PartyTypes,
+    Map: PartiesMap<RoundIDs::Item, Self::RoundPartyIdx, P::PartyID> {
     /// Type of protocol messages.
     type Msg: RoundMsg<RoundIDs::Item>;
     /// Type of outbound message structures.
@@ -92,21 +90,21 @@ where
     /// Type of [Codec]s for consensus protocol messages.
     type Rounds: Rounds
         + RoundsAdvance<RoundIDs::Item>
-        + RoundsUpdate<<Self::State as ProtoState<RoundIDs::Item, PartyID>>::Oper>
+        + RoundsUpdate<<Self::State as ProtoState<RoundIDs::Item, P::PartyID>>::Oper>
         + RoundsParties<
             RoundIDs::Item,
-            PartyID,
+            P::PartyID,
             <Self::Out as Outbound<RoundIDs::Item, Self::Msg>>::PartyID
         > + RoundsRecv<
             RoundIDs::Item,
-            PartyID,
-            <Self::State as ProtoState<RoundIDs::Item, PartyID>>::Oper,
+            P::PartyID,
+            <Self::State as ProtoState<RoundIDs::Item, P::PartyID>>::Oper,
             Self::Msg
-        > + RoundsSetParties<Party, PartyCodec>;
+        > + RoundsSetParties<P::Party, P::PartyCodec>;
     /// Protocol state machine.
-    type State: ProtoStateSetParties<PartyID, Party, PartyCodec>
-        + ProtoStateRound<RoundIDs::Item, PartyID, Self::Msg, Self::Out>
-        + ProtoState<RoundIDs::Item, PartyID>;
+    type State: ProtoStateSetParties<P>
+        + ProtoStateRound<RoundIDs::Item, P::PartyID, Self::Msg, Self::Out>
+        + ProtoState<RoundIDs::Item, P::PartyID>;
     /// Type of errors that can occur creating [Rounds].
     type RoundsError<PartiesErr>: Display
     where
@@ -116,7 +114,7 @@ where
     fn rounds(
         &self,
         round_ids: RoundIDs
-    ) -> Result<Self::Rounds, Self::RoundsError<P::RoundError>>;
+    ) -> Result<Self::Rounds, Self::RoundsError<Map::RoundError>>;
 }
 
 /// Wrapper around [ConsensusProto] implementations for sharing
@@ -125,69 +123,59 @@ where
 /// The [ConsensusProtoRounds] implementation wraps the associated
 /// [Rounds] implementation in [SharedRounds].
 #[derive(Clone)]
-pub struct SharedConsensusProto<Inner, RoundIDs, PartyID, Party, PartyCodec, P>
+pub struct SharedConsensusProto<Inner, RoundIDs, Map, P>
 where
-    Inner: ConsensusProto<Party, PartyCodec>
-        + ConsensusProtoRounds<RoundIDs, PartyID, Party, PartyCodec, P>,
+    Inner: ConsensusProto<P::Party, P::PartyCodec>
+        + ConsensusProtoRounds<RoundIDs, Map, P>,
+    P: PartyTypes,
     RoundIDs: Iterator,
     RoundIDs::Item: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
-    Party: Clone + Display + Eq + Hash,
-    P: PartiesMap<RoundIDs::Item, Inner::RoundPartyIdx, PartyID>,
-    PartyCodec: Decoder<Party> + Encoder<Party> {
+    Map: PartiesMap<RoundIDs::Item, Inner::RoundPartyIdx, P::PartyID> {
     round_ids: PhantomData<RoundIDs>,
-    party_id: PhantomData<PartyID>,
-    party: PhantomData<Party>,
-    party_codec: PhantomData<PartyCodec>,
-    parties: PhantomData<P>,
+    party_types: PhantomData<P>,
+    parties: PhantomData<Map>,
     inner: Inner
 }
 
-impl<Inner, RoundIDs, PartyID, Party, PartyCodec, P>
-    ConsensusProto<Party, PartyCodec>
-    for SharedConsensusProto<Inner, RoundIDs, PartyID, Party, PartyCodec, P>
+impl<Inner, RoundIDs, Map, P>
+    ConsensusProto<P::Party, P::PartyCodec>
+    for SharedConsensusProto<Inner, RoundIDs, Map, P>
 where
-    Inner: ConsensusProto<Party, PartyCodec>
-        + ConsensusProtoRounds<RoundIDs, PartyID, Party, PartyCodec, P>,
+    Inner: ConsensusProto<P::Party, P::PartyCodec>
+        + ConsensusProtoRounds<RoundIDs, Map, P>,
     RoundIDs: Iterator,
     RoundIDs::Item: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
-    Party: Clone + Display + Eq + Hash,
-    P: PartiesMap<RoundIDs::Item, Inner::RoundPartyIdx, PartyID>,
-    PartyCodec: Decoder<Party> + Encoder<Party>
+    Map: PartiesMap<RoundIDs::Item, Inner::RoundPartyIdx, P::PartyID>,
+    P: PartyTypes,
 {
     type Config = Inner::Config;
     type CreateError = Inner::CreateError;
 
     fn create(
         config: Self::Config,
-        party_codec: PartyCodec
+        party_codec: P::PartyCodec
     ) -> Result<Self, Self::CreateError> {
         let inner = Inner::create(config, party_codec)?;
 
         Ok(SharedConsensusProto {
             round_ids: PhantomData,
-            party_id: PhantomData,
-            party: PhantomData,
-            party_codec: PhantomData,
+            party_types: PhantomData,
             parties: PhantomData,
             inner: inner
         })
     }
 }
 
-impl<Inner, RoundIDs, PartyID, Party, PartyCodec, P>
-    ConsensusProtoRounds<RoundIDs, PartyID, Party, PartyCodec, P>
-    for SharedConsensusProto<Inner, RoundIDs, PartyID, Party, PartyCodec, P>
+impl<Inner, RoundIDs, Map, P>
+    ConsensusProtoRounds<RoundIDs, Map, P>
+    for SharedConsensusProto<Inner, RoundIDs, Map, P>
 where
-    Inner: ConsensusProto<Party, PartyCodec>
-        + ConsensusProtoRounds<RoundIDs, PartyID, Party, PartyCodec, P>,
+    Inner: ConsensusProto<P::Party, P::PartyCodec>
+        + ConsensusProtoRounds<RoundIDs, Map, P>,
     RoundIDs: Iterator,
     RoundIDs::Item: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
-    Party: Clone + Display + Eq + Hash,
-    P: PartiesMap<RoundIDs::Item, Inner::RoundPartyIdx, PartyID>,
-    PartyCodec: Decoder<Party> + Encoder<Party>
+    Map: PartiesMap<RoundIDs::Item, Inner::RoundPartyIdx, P::PartyID>,
+    P: PartyTypes,
 {
     type Msg = Inner::Msg;
     type Out = Inner::Out;
@@ -195,8 +183,8 @@ where
     type Rounds = SharedRounds<
         Inner::Rounds,
         RoundIDs::Item,
-        PartyID,
-        <Inner::State as ProtoState<RoundIDs::Item, PartyID>>::Oper,
+        P::PartyID,
+        <Inner::State as ProtoState<RoundIDs::Item, P::PartyID>>::Oper,
         Self::Msg,
         Self::Out
     >;
@@ -209,7 +197,7 @@ where
     fn rounds(
         &self,
         round_ids: RoundIDs
-    ) -> Result<Self::Rounds, Self::RoundsError<P::RoundError>> {
+    ) -> Result<Self::Rounds, Self::RoundsError<Map::RoundError>> {
         let rounds = self.inner.rounds(round_ids)?;
 
         Ok(SharedRounds::new(rounds))
