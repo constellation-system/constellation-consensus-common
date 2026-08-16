@@ -32,14 +32,18 @@
 //!
 //!  - A protocol state machine (see [ProtoState]), which will be used as
 //!    [ConsensusProtoRounds::State].
+use std::fmt::Debug;
 use std::fmt::Display;
 use std::marker::PhantomData;
 
-use constellation_common::codec::Decoder;
-use constellation_common::codec::Encoder;
+use constellation_common::config::CreateWithParam;
+use constellation_common::error::ScopedError;
 
 use crate::outbound::Outbound;
 use crate::parties::PartiesMap;
+use crate::parties::PartyTypes;
+use crate::parties::RoundIDGenTypes;
+use crate::parties::RoundPartyIdxTypes;
 use crate::round::RoundMsg;
 use crate::round::Rounds;
 use crate::round::RoundsAdvance;
@@ -51,69 +55,89 @@ use crate::round::SharedRounds;
 use crate::state::ProtoState;
 use crate::state::ProtoStateRound;
 use crate::state::ProtoStateSetParties;
-use crate::types::PartyTypes;
 
-/// Base trait for consensus protocol implementations.
+/// Type trait for consensus protocol messages.
 ///
-/// This provides the means to create a consenus protocol
-/// implementation.  Most of the meaningful definitions are found in
-/// [ConsensusProtoRounds].
-pub trait ConsensusProto<Party, PartyCodec>: Sized
+/// This is one of the type traits that needs to be implemented as
+/// part of a consensus protocol.
+///
+/// # Type Parameters
+///
+/// - `RoundID`: Type of round IDs.
+pub trait ConsensusProtoMsgTypes<RoundID>
 where
-    PartyCodec: Decoder<Party> + Encoder<Party> {
-    /// Type of configuration objects used to create the protocol.
-    type Config: Default;
-    /// Type of errors that can occur creating a protocol instance.
-    type CreateError: Display;
-
-    /// Create an instance of the protocol from a configuration object.
-    fn create(
-        config: Self::Config,
-        party_codec: PartyCodec
-    ) -> Result<Self, Self::CreateError>;
+    RoundID: Clone + Display + Ord {
+    type Payload;
+    /// Type of protocol messages.
+    type Msg: Clone + RoundMsg<RoundID, Payload = Self::Payload>;
 }
 
-/// Base trait for all consensus protocol implementations.
-pub trait ConsensusProtoRounds<RoundIDs, Map, P>:
-    ConsensusProto<P::Party, P::PartyCodec>
+/// Type trait for outbound message boxes for consensus protocols.
+///
+/// This is one of the type traits that needs to be implemented as
+/// part of a consensus protocol.
+///
+/// # Type Parameters
+///
+/// - `Types`: [RoundPartyIdxTypes] type trait, describing round and party IDs.
+pub trait ConsensusProtoOutboundTypes<Types>:
+    ConsensusProtoMsgTypes<Types::RoundID>
 where
-    RoundIDs: Iterator,
-    RoundIDs::Item: Clone + Display + Ord,
-    P: PartyTypes,
-    Map: PartiesMap<RoundIDs::Item, Self::RoundPartyIdx, P::PartyID> {
-    /// Type of protocol messages.
-    type Msg: RoundMsg<RoundIDs::Item>;
-    /// Type of outbound message structures.
-    type Out: Outbound<RoundIDs::Item, Self::Msg>;
-    /// Type of party indexes specific to a round.
-    type RoundPartyIdx: Clone + Display + From<usize> + Into<usize>;
-    /// Type of [Codec]s for consensus protocol messages.
+    Types: RoundPartyIdxTypes {
+    type CollectOutboundError: Debug + Display + ScopedError;
+    type RecvError: Display;
+    type Out: Outbound<
+            Types::RoundID,
+            Self::Msg,
+            PartyID = Types::PartyRoundIdx,
+            RecvError = Self::RecvError,
+            CollectOutboundError = Self::CollectOutboundError
+        >;
+}
+
+/// Top-level trait for consensus protocol implementations.
+pub trait ConsensusProto<Map, Types>:
+    CreateWithParam<Types::PartyCodec>
+where
+    Types: PartyTypes + RoundPartyIdxTypes + RoundIDGenTypes,
+    Map: PartiesMap<Types> {
+    /// Type trait describing the protocol messages and outbound
+    /// message box.
+    type ProtoTypes: ConsensusProtoOutboundTypes<Types>;
+    /// Data structure used to track protocol rounds.
+    ///
+    /// Implementors should generally use one of the already-existing
+    /// implementations in [rounds](crate::rounds), such as
+    /// [SingleRound](crate::rounds::SingleRound).
     type Rounds: Rounds
-        + RoundsAdvance<RoundIDs::Item>
-        + RoundsUpdate<<Self::State as ProtoState<RoundIDs::Item, P::PartyID>>::Oper>
-        + RoundsParties<
-            RoundIDs::Item,
-            P::PartyID,
-            <Self::Out as Outbound<RoundIDs::Item, Self::Msg>>::PartyID
-        > + RoundsRecv<
-            RoundIDs::Item,
-            P::PartyID,
-            <Self::State as ProtoState<RoundIDs::Item, P::PartyID>>::Oper,
-            Self::Msg
-        > + RoundsSetParties<P::Party, P::PartyCodec>;
-    /// Protocol state machine.
-    type State: ProtoStateSetParties<P>
-        + ProtoStateRound<RoundIDs::Item, P::PartyID, Self::Msg, Self::Out>
-        + ProtoState<RoundIDs::Item, P::PartyID>;
+        + RoundsAdvance<Types::RoundID>
+        + RoundsUpdate<<Self::State as ProtoState<Types>>::Oper>
+        + RoundsParties<Types>
+        + RoundsRecv<
+            Types,
+            Self::ProtoTypes,
+            <Self::State as ProtoState<Types>>::Oper
+        > + RoundsSetParties<Types>;
+    /// Type of the single-round protocol state machine.
+    type State: ProtoStateSetParties<Types>
+        + ProtoStateRound<Types, Self::ProtoTypes>
+        + ProtoState<Types>;
     /// Type of errors that can occur creating [Rounds].
     type RoundsError<PartiesErr>: Display
     where
         PartiesErr: Display;
 
-    /// Obtain the [Rounds] implementation for this consensus protocol.
+    /// Obtain a protocol engine for this protocol.
+    ///
+    /// This is used by upstream users to obtain a protocol engine
+    /// instance.
+    ///
+    /// # Parameters
+    ///
+    /// - `round_ids`: The round ID generator.
     fn rounds(
         &self,
-        round_ids: RoundIDs
+        round_ids: Types::RoundIDs
     ) -> Result<Self::Rounds, Self::RoundsError<Map::RoundError>>;
 }
 
@@ -123,70 +147,53 @@ where
 /// The [ConsensusProtoRounds] implementation wraps the associated
 /// [Rounds] implementation in [SharedRounds].
 #[derive(Clone)]
-pub struct SharedConsensusProto<Inner, RoundIDs, Map, P>
+pub struct SharedConsensusProto<Inner, Map, Types>
 where
-    Inner: ConsensusProto<P::Party, P::PartyCodec>
-        + ConsensusProtoRounds<RoundIDs, Map, P>,
-    P: PartyTypes,
-    RoundIDs: Iterator,
-    RoundIDs::Item: Clone + Display + Ord,
-    Map: PartiesMap<RoundIDs::Item, Inner::RoundPartyIdx, P::PartyID> {
-    round_ids: PhantomData<RoundIDs>,
-    party_types: PhantomData<P>,
+    Inner: ConsensusProto<Map, Types>,
+    Types: PartyTypes + RoundPartyIdxTypes + RoundIDGenTypes,
+    Map: PartiesMap<Types> {
+    types: PhantomData<Types>,
     parties: PhantomData<Map>,
     inner: Inner
 }
 
-impl<Inner, RoundIDs, Map, P>
-    ConsensusProto<P::Party, P::PartyCodec>
-    for SharedConsensusProto<Inner, RoundIDs, Map, P>
+impl<Inner, Map, Types> CreateWithParam<Types::PartyCodec>
+    for SharedConsensusProto<Inner, Map, Types>
 where
-    Inner: ConsensusProto<P::Party, P::PartyCodec>
-        + ConsensusProtoRounds<RoundIDs, Map, P>,
-    RoundIDs: Iterator,
-    RoundIDs::Item: Clone + Display + Ord,
-    Map: PartiesMap<RoundIDs::Item, Inner::RoundPartyIdx, P::PartyID>,
-    P: PartyTypes,
+    Inner: ConsensusProto<Map, Types>,
+    Types: PartyTypes + RoundPartyIdxTypes + RoundIDGenTypes,
+    Map: PartiesMap<Types>
 {
     type Config = Inner::Config;
     type CreateError = Inner::CreateError;
 
     fn create(
         config: Self::Config,
-        party_codec: P::PartyCodec
+        codec: Types::PartyCodec
     ) -> Result<Self, Self::CreateError> {
-        let inner = Inner::create(config, party_codec)?;
+        let inner = Inner::create(config, codec)?;
 
         Ok(SharedConsensusProto {
-            round_ids: PhantomData,
-            party_types: PhantomData,
+            types: PhantomData,
             parties: PhantomData,
             inner: inner
         })
     }
 }
 
-impl<Inner, RoundIDs, Map, P>
-    ConsensusProtoRounds<RoundIDs, Map, P>
-    for SharedConsensusProto<Inner, RoundIDs, Map, P>
+impl<Inner, Map, Types> ConsensusProto<Map, Types>
+    for SharedConsensusProto<Inner, Map, Types>
 where
-    Inner: ConsensusProto<P::Party, P::PartyCodec>
-        + ConsensusProtoRounds<RoundIDs, Map, P>,
-    RoundIDs: Iterator,
-    RoundIDs::Item: Clone + Display + Ord,
-    Map: PartiesMap<RoundIDs::Item, Inner::RoundPartyIdx, P::PartyID>,
-    P: PartyTypes,
+    Inner: ConsensusProto<Map, Types> + CreateWithParam<Types::PartyCodec>,
+    Types: PartyTypes + RoundPartyIdxTypes + RoundIDGenTypes,
+    Map: PartiesMap<Types>
 {
-    type Msg = Inner::Msg;
-    type Out = Inner::Out;
-    type RoundPartyIdx = Inner::RoundPartyIdx;
+    type ProtoTypes = Inner::ProtoTypes;
     type Rounds = SharedRounds<
         Inner::Rounds,
-        RoundIDs::Item,
-        P::PartyID,
-        <Inner::State as ProtoState<RoundIDs::Item, P::PartyID>>::Oper,
-        Self::Msg,
-        Self::Out
+        Types,
+        Inner::ProtoTypes,
+        <Inner::State as ProtoState<Types>>::Oper
     >;
     type RoundsError<PartiesErr>
         = Inner::RoundsError<PartiesErr>
@@ -196,7 +203,7 @@ where
 
     fn rounds(
         &self,
-        round_ids: RoundIDs
+        round_ids: Types::RoundIDs
     ) -> Result<Self::Rounds, Self::RoundsError<Map::RoundError>> {
         let rounds = self.inner.rounds(round_ids)?;
 

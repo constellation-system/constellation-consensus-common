@@ -34,4 +34,3 @@ pub mod parties;
 pub mod proto;
 pub mod round;
 pub mod state;
-pub mod types;

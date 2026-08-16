@@ -33,9 +33,10 @@
 //!    are *potentially different* from the more permanent set of IDs assigned
 //!    to parties.
 use std::cmp::Ordering;
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::convert::Infallible;
+use std::fmt::Debug;
 use std::fmt::Display;
 use std::fmt::Error;
 use std::fmt::Formatter;
@@ -47,12 +48,48 @@ use std::ops::Range;
 use std::ops::RangeFrom;
 use std::ops::RangeTo;
 
+use constellation_common::codec::Decoder;
+use constellation_common::codec::Encoder;
+use constellation_common::codec::ISizeCodec;
 use constellation_common::error::ErrorScope;
 use constellation_common::error::ScopedError;
 
-use crate::types::PartyTypes;
-use crate::types::RoundPartyIDTypes;
-use crate::types::RoundPartyIdxTypes;
+pub trait RoundPartyIDTypes {
+    /// Type of IDs used to index a [Party](RoundPartyIDTypes::Party) generally.
+    ///
+    /// This is used to index all parties that are known to the
+    /// consensus protocol currently.  Within a given round, parties
+    /// are given a [PartyRoundIdx](RoundPartyIDTypes::PartyRoundIdx)
+    type PartyID: Clone + Display + Eq + Hash + Ord + From<usize> + Into<usize>;
+    /// Type of IDs for individual rounds.
+    type RoundID: Clone + Debug + Display + Hash + Eq + Ord;
+}
+
+pub trait RoundPartyIdxTypes: RoundPartyIDTypes {
+    /// Type of IDs used to index a (RoundPartyIDTypes::Party) in a
+    /// given round.
+    ///
+    /// The set of parties active in a given consensus round and the
+    /// set of parties known to the protocol generally may differ over
+    /// time.  This type exists so that the parties active in each
+    /// round may be assigned a contiguous range of integers.
+    type PartyRoundIdx: Clone + Display + From<usize> + Into<usize>;
+}
+
+pub trait RoundIDGenTypes: RoundPartyIDTypes {
+    /// Generator used to obtain [RoundID](RoundPartyIDTypes::RoundID)s.
+    type RoundIDs: Iterator<Item = Self::RoundID>;
+}
+
+pub trait PartyTypes {
+    /// Type of party data.
+    ///
+    /// This is in general a complex datatype used to identify
+    /// parties.
+    type Party: Clone + Display + Eq + Hash;
+    /// Codec for encoding and decoding [Party](PartyTypes::Party)s.
+    type PartyCodec: Decoder<Self::Party> + Encoder<Self::Party>;
+}
 
 /// Base trait for tracking parties through consensus rounds.
 pub trait PartiesUpdate<Party> {
@@ -107,9 +144,10 @@ pub trait PartiesRounds<Round> {
 /// Trait for the set of parties participating in a consensus protocol.
 ///
 /// This allows parties to be added and removed at given rounds.
-pub trait Parties<T>: PartiesUpdate<T::PartyID> + PartiesRounds<T::RoundID>
-where T: RoundPartyIDTypes
-{
+pub trait Parties<T>:
+    PartiesUpdate<T::PartyID> + PartiesRounds<T::RoundID>
+where
+    T: RoundPartyIDTypes {
     /// Type of errors that can be returned by
     /// [start_party_at](DynamicParties::start_party_at) and
     /// [stop_party_at](Parties::stop_party_at).
@@ -171,7 +209,7 @@ where
 /// convenient representation.
 pub struct PartyIDMap<T>
 where
-    T: PartyTypes {
+    T: PartyTypes + RoundPartyIDTypes {
     /// Map from [Party] to index.
     fwd_map: HashMap<T::Party, T::PartyID>,
     /// Map from index to [Party].
@@ -269,6 +307,22 @@ pub enum DynamicPartiesError {
     RoundOutsideWindow
 }
 
+pub struct TestPartyTypes;
+
+impl RoundPartyIDTypes for TestPartyTypes {
+    type PartyID = usize;
+    type RoundID = usize;
+}
+
+impl RoundPartyIdxTypes for TestPartyTypes {
+    type PartyRoundIdx = usize;
+}
+
+impl PartyTypes for TestPartyTypes {
+    type Party = isize;
+    type PartyCodec = ISizeCodec;
+}
+
 impl<'a, Party> Iterator for DynamicPartiesIter<'a, Party>
 where
     Party: Clone + Eq + Hash
@@ -306,7 +360,7 @@ impl<Party> FusedIterator for DynamicPartiesIter<'_, Party> where
 
 impl<T> PartyIDMap<T>
 where
-    T: PartyTypes
+    T: PartyTypes + RoundPartyIDTypes
 {
     /// Create a `PartyIDMap` from an iterator over the parties in a
     /// round.
@@ -435,7 +489,7 @@ where
 
 impl<T> Default for DynamicParties<T>
 where
-    T: PartyTypes
+    T: PartyTypes + RoundPartyIDTypes
 {
     #[inline]
     fn default() -> Self {
@@ -450,7 +504,7 @@ where
 
 impl<T> DynamicParties<T>
 where
-    T: PartyTypes
+    T: PartyTypes + RoundPartyIDTypes
 {
     /// Create a new `DynamicParties`.
     #[inline]
@@ -549,7 +603,8 @@ impl<T> Parties<T> for StaticParties<T::PartyID>
 where
     T: RoundPartyIDTypes
 {
-    type PartiesIter<'a> = std::slice::Iter<'a, T::PartyID>
+    type PartiesIter<'a>
+        = std::slice::Iter<'a, T::PartyID>
     where
         Self: 'a,
         T::PartyID: 'a;
@@ -582,11 +637,7 @@ where
     }
 }
 
-impl<T> PartiesMap<T> for StaticParties<T::PartyID>
-where
-    T: RoundPartyIdxTypes
-{
-}
+impl<T> PartiesMap<T> for StaticParties<T::PartyID> where T: RoundPartyIdxTypes {}
 
 impl<T> PartiesUpdate<T::PartyID> for DynamicParties<T>
 where
@@ -601,10 +652,10 @@ where
         let mut old_parties = replace(&mut self.parties, new_parties);
 
         for (i, new_party) in parties.into_iter().enumerate() {
-            if let Some(old_party) = &map[i] {
-                if let Some(ent) = old_parties.remove(old_party) {
-                    self.parties.insert(new_party, ent);
-                }
+            if let Some(old_party) = &map[i] &&
+                let Some(ent) = old_parties.remove(old_party)
+            {
+                self.parties.insert(new_party, ent);
             }
         }
     }
@@ -657,7 +708,8 @@ impl<T> Parties<T> for DynamicParties<T>
 where
     T: RoundPartyIDTypes
 {
-    type PartiesIter<'a> = DynamicPartiesIter<'a, T::PartyID>
+    type PartiesIter<'a>
+        = DynamicPartiesIter<'a, T::PartyID>
     where
         Self: 'a,
         T::PartyID: 'a;
@@ -719,9 +771,8 @@ where
     }
 }
 
-impl<T> PartiesMap<T> for DynamicParties<T>
-where
-    T: PartyTypes
+impl<T> PartiesMap<T> for DynamicParties<T> where
+    T: PartyTypes + RoundPartyIdxTypes
 {
 }
 
@@ -872,7 +923,7 @@ impl RoundIntervals {
                 start,
                 intervals,
                 end
-            } if start.map_or(true, |start| start.end <= round) => {
+            } if start.is_none_or(|start| start.end <= round) => {
                 let len = intervals.len();
 
                 for i in 0..len {
@@ -908,7 +959,7 @@ impl RoundIntervals {
                     }
                     _ => {
                         *start = None;
-                        intervals.truncate(0);
+                        intervals.clear();
                     }
                 }
             }
@@ -970,7 +1021,7 @@ impl Display for RoundIntervals {
 
 impl<T> Display for DynamicParties<T>
 where
-    T: PartyTypes
+    T: PartyTypes + RoundPartyIdxTypes
 {
     fn fmt(
         &self,
@@ -990,7 +1041,9 @@ impl Display for StaticPartiesError {
         f: &mut Formatter<'_>
     ) -> Result<(), Error> {
         match self {
-            StaticPartiesError::Static => write!(f, "parties cannot be changed")
+            StaticPartiesError::Static => {
+                write!(f, "parties cannot be changed")
+            }
         }
     }
 }
@@ -1010,9 +1063,6 @@ impl Display for DynamicPartiesError {
 
 #[cfg(test)]
 use std::collections::HashSet;
-
-#[cfg(test)]
-use crate::types::TestPartyTypes;
 
 #[test]
 fn test_round_intervals_is_empty() {

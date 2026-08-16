@@ -37,18 +37,20 @@ use std::time::Instant;
 
 use constellation_common::error::ScopedError;
 
-use crate::outbound::Outbound;
 use crate::parties::Parties;
 use crate::parties::PartyRoundIDMap;
-use crate::round::RoundMsg;
-use crate::types::PartyTypes;
+use crate::parties::PartyTypes;
+use crate::parties::RoundPartyIDTypes;
+use crate::parties::RoundPartyIdxTypes;
+use crate::proto::ConsensusProtoOutboundTypes;
 
 /// Trait for inter-round protocol states.
 ///
 /// This trait allows protocol-specific state to be persisted between
 /// rounds and to be updated with the results of a round.
 pub trait ProtoState<Types>: Sized
-where Types: PartyTypes {
+where
+    Types: RoundPartyIDTypes {
     /// Configuration for creating states.
     type Config;
     /// Type of state-update operations.
@@ -71,22 +73,31 @@ where Types: PartyTypes {
         P: Parties<Types>;
 }
 
-pub trait ProtoStateSubmit<Elem> {
+/// Trait for recording requests in the protocol state.
+pub trait ProtoStateSubmit<Req> {
     type SubmitError: Display + ScopedError;
 
-    fn submit_elems<I>(
+    /// Record requests into the protocol state.
+    ///
+    /// This will result in the local protocol state now knowing about
+    /// these requests, and eventually forwarding them to other nodes.
+    ///
+    /// # Parameters
+    ///
+    /// - `reqs`: [Iterator] of requests to submit.
+    fn submit_reqs<I>(
         &mut self,
-        elems: I
+        reqs: I
     ) -> Result<(), Self::SubmitError>
     where
-        I: Iterator<Item = Elem>;
+        I: Iterator<Item = Req>;
 }
 
 /// Subtrait of [ProtoState] allowing inter-round protocol states to
 /// be created from a configuration object.
 pub trait ProtoStateSetParties<Types>
 where
-    Types: PartyTypes {
+    Types: PartyTypes + RoundPartyIDTypes {
     /// Type of errors that can occur creating a `ProtoState`.
     type SetPartiesError: Display;
 
@@ -104,20 +115,13 @@ where
 
 /// Subtrait of [ProtoState] allowing individual round states to be
 /// created.
-pub trait ProtoStateRound<Types, Msg, Out>: ProtoState<Types>
+pub trait ProtoStateRound<Types, ProtoTypes>: ProtoState<Types>
 where
-    Types: PartyTypes,
-    Out: Outbound<Types::RoundID, Msg, PartyID = Types::PartyRoundIdx>,
-    Msg: RoundMsg<Types::RoundID> {
+    ProtoTypes: ConsensusProtoOutboundTypes<Types>,
+    Types: PartyTypes + RoundPartyIdxTypes {
     /// Type of round states.
-    type Round: RoundStateRecv<
-            Types::RoundID,
-            Out::PartyID,
-            Self::Oper,
-            Msg::Payload,
-            Self::Info,
-            Out
-        > + RoundStateNotify<Out, Self>;
+    type Round: RoundStateRecv<Types, ProtoTypes, Self::Oper, Self::Info>
+        + RoundStateNotify<ProtoTypes::Out, Self>;
     /// Type of non-mutable round state.
     type Info;
     /// Errors that can occur when creating a round state.
@@ -128,7 +132,7 @@ where
         &mut self,
         parties: &PartyRoundIDMap<Types>
     ) -> Result<
-        (Self::Round, Self::Info, Out, Option<Instant>),
+        (Self::Round, Self::Info, ProtoTypes::Out, Option<Instant>),
         Self::CreateRoundError
     >;
 }
@@ -154,16 +158,19 @@ pub trait RoundStateNotify<Out, State>: Sized {
     ) -> Result<Self, Self::NotifyError>;
 }
 
-pub trait RoundStateRecv<RoundID, Party, Oper, Msg, Info, Out>:
-    RoundState<Out> {
+pub trait RoundStateRecv<Types, ProtoTypes, Oper, Info>:
+    RoundState<ProtoTypes::Out>
+where
+    ProtoTypes: ConsensusProtoOutboundTypes<Types>,
+    Types: PartyTypes + RoundPartyIdxTypes {
     /// Process a protocol message.
     fn recv(
         self,
-        out: &mut Out,
+        out: &mut ProtoTypes::Out,
         info: &Info,
-        round: &RoundID,
-        party: &Party,
-        msg: Msg
+        round: &Types::RoundID,
+        party: &Types::PartyRoundIdx,
+        msg: ProtoTypes::Payload
     ) -> RoundStateUpdate<Self, Oper>;
 }
 
