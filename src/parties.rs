@@ -73,7 +73,13 @@ pub trait RoundPartyIdxTypes: RoundPartyIDTypes {
     /// set of parties known to the protocol generally may differ over
     /// time.  This type exists so that the parties active in each
     /// round may be assigned a contiguous range of integers.
-    type PartyRoundIdx: Clone + Display + From<usize> + Into<usize>;
+    type PartyRoundIdx: Clone
+        + Display
+        + Eq
+        + Hash
+        + Ord
+        + From<usize>
+        + Into<usize>;
 }
 
 pub trait RoundIDGenTypes: RoundPartyIDTypes {
@@ -88,7 +94,10 @@ pub trait PartyTypes {
     /// parties.
     type Party: Clone + Display + Eq + Hash;
     /// Codec for encoding and decoding [Party](PartyTypes::Party)s.
-    type PartyCodec: Decoder<Self::Party> + Encoder<Self::Party>;
+    type PartyCodec: Decoder<Self::Party, DecodeError = Self::DecodeError>
+        + Encoder<Self::Party, EncodeError = Self::EncodeError>;
+    type DecodeError: Debug + Display + ScopedError;
+    type EncodeError: Debug + Display + ScopedError;
 }
 
 /// Base trait for tracking parties through consensus rounds.
@@ -193,7 +202,7 @@ where
 pub trait PartiesMap<T>: Parties<T>
 where
     T: RoundPartyIdxTypes {
-    /// Get the [PartyIDMap] for round `round`.
+    /// Get the [PartyRoundIDMap] for round `round`.
     #[inline]
     fn parties_map(
         &self,
@@ -201,19 +210,6 @@ where
     ) -> Result<PartyRoundIDMap<T>, Self::RoundError> {
         Ok(PartyRoundIDMap::from_iter(self.parties(round)?))
     }
-}
-
-/// A map from external parties to integer-like identifiers.
-///
-/// This is intended primarily for mapping parties to a more
-/// convenient representation.
-pub struct PartyIDMap<T>
-where
-    T: PartyTypes + RoundPartyIDTypes {
-    /// Map from [Party] to index.
-    fwd_map: HashMap<T::Party, T::PartyID>,
-    /// Map from index to [Party].
-    rev_map: Vec<T::Party>
 }
 
 /// A map between [PartyID](RoundPartyIDTypes::PartyID)s and
@@ -319,6 +315,8 @@ impl RoundPartyIdxTypes for TestPartyTypes {
 }
 
 impl PartyTypes for TestPartyTypes {
+    type DecodeError = <ISizeCodec as Decoder<isize>>::DecodeError;
+    type EncodeError = <ISizeCodec as Encoder<isize>>::EncodeError;
     type Party = isize;
     type PartyCodec = ISizeCodec;
 }
@@ -356,64 +354,6 @@ where
 impl<Party> FusedIterator for DynamicPartiesIter<'_, Party> where
     Party: Clone + Eq + Hash
 {
-}
-
-impl<T> PartyIDMap<T>
-where
-    T: PartyTypes + RoundPartyIDTypes
-{
-    /// Create a `PartyIDMap` from an iterator over the parties in a
-    /// round.
-    #[inline]
-    fn from_iter<'a, I>(iter: I) -> PartyIDMap<T>
-    where
-        I: Iterator<Item = &'a T::Party>,
-        T::Party: 'a {
-        Self::create(iter.cloned().collect())
-    }
-
-    /// Create a `PartyIDMap` from a [Vec] containing all the parties
-    /// in a round.
-    fn create(parties: Vec<T::Party>) -> PartyIDMap<T> {
-        let mut map = HashMap::with_capacity(parties.len());
-
-        for (i, party) in parties.iter().enumerate() {
-            map.insert(party.clone(), i.into());
-        }
-
-        PartyIDMap {
-            fwd_map: map,
-            rev_map: parties
-        }
-    }
-
-    /// Get the number of parties in the map.
-    #[inline]
-    pub fn nparties(&self) -> usize {
-        self.rev_map.len()
-    }
-
-    /// Get the dense integer representing `party`.
-    #[inline]
-    pub fn party_idx(
-        &self,
-        party: &T::Party
-    ) -> Option<&T::PartyID> {
-        self.fwd_map.get(party)
-    }
-
-    /// Get the party represented by `idx`.
-    #[inline]
-    pub fn idx_party(
-        &self,
-        idx: usize
-    ) -> Option<&T::Party> {
-        if idx < self.rev_map.len() {
-            Some(&self.rev_map[idx])
-        } else {
-            None
-        }
-    }
 }
 
 impl<T> PartyRoundIDMap<T>

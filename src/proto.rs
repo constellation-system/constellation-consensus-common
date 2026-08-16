@@ -36,7 +36,7 @@ use std::fmt::Debug;
 use std::fmt::Display;
 use std::marker::PhantomData;
 
-use constellation_common::config::CreateWithParam;
+use constellation_common::config::Create;
 use constellation_common::error::ScopedError;
 
 use crate::outbound::Outbound;
@@ -96,8 +96,7 @@ where
 }
 
 /// Top-level trait for consensus protocol implementations.
-pub trait ConsensusProto<Map, Types>:
-    CreateWithParam<Types::PartyCodec>
+pub trait ConsensusProto<Map, Types>: Create
 where
     Types: PartyTypes + RoundPartyIdxTypes + RoundIDGenTypes,
     Map: PartiesMap<Types> {
@@ -157,8 +156,7 @@ where
     inner: Inner
 }
 
-impl<Inner, Map, Types> CreateWithParam<Types::PartyCodec>
-    for SharedConsensusProto<Inner, Map, Types>
+impl<Inner, Map, Types> Create for SharedConsensusProto<Inner, Map, Types>
 where
     Inner: ConsensusProto<Map, Types>,
     Types: PartyTypes + RoundPartyIdxTypes + RoundIDGenTypes,
@@ -167,11 +165,8 @@ where
     type Config = Inner::Config;
     type CreateError = Inner::CreateError;
 
-    fn create(
-        config: Self::Config,
-        codec: Types::PartyCodec
-    ) -> Result<Self, Self::CreateError> {
-        let inner = Inner::create(config, codec)?;
+    fn create(config: Self::Config) -> Result<Self, Self::CreateError> {
+        let inner = Inner::create(config)?;
 
         Ok(SharedConsensusProto {
             types: PhantomData,
@@ -184,7 +179,7 @@ where
 impl<Inner, Map, Types> ConsensusProto<Map, Types>
     for SharedConsensusProto<Inner, Map, Types>
 where
-    Inner: ConsensusProto<Map, Types> + CreateWithParam<Types::PartyCodec>,
+    Inner: ConsensusProto<Map, Types> + Create,
     Types: PartyTypes + RoundPartyIdxTypes + RoundIDGenTypes,
     Map: PartiesMap<Types>
 {
