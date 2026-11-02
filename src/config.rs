@@ -24,14 +24,16 @@ use serde::Serialize;
 )]
 #[serde(rename = "consensus-pool")]
 #[serde(rename_all = "kebab-case")]
-pub struct SingleRoundConfig<State> {
+pub struct SingleRoundConfig<PartyCodec, State> {
+    #[serde(default)]
+    party_codec: PartyCodec,
     #[serde(default)]
     backlog_size_hint: Option<usize>,
     #[serde(flatten)]
     state: State
 }
 
-impl<State> SingleRoundConfig<State> {
+impl<PartyCodec, State> SingleRoundConfig<PartyCodec, State> {
     #[inline]
     pub fn backlog_size_hint(&self) -> Option<usize> {
         self.backlog_size_hint
@@ -42,7 +44,8 @@ impl<State> SingleRoundConfig<State> {
         &self.state
     }
 
-    pub fn take(self) -> (Option<usize>, State) {
-        (self.backlog_size_hint, self.state)
+    #[inline]
+    pub fn take(self) -> (PartyCodec, Option<usize>, State) {
+        (self.party_codec, self.backlog_size_hint, self.state)
     }
 }

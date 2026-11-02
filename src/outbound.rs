@@ -48,7 +48,7 @@ use crate::round::RoundMsg;
 /// unreliable network.
 pub trait Outbound<RoundID, Msg>
 where
-    RoundID: Clone + Display + Ord,
+    RoundID: Clone + Debug + Display + Ord,
     Msg: RoundMsg<RoundID> {
     type PartyID: Clone + Display + From<usize> + Into<usize>;
     /// Type of errors that can result from

@@ -51,6 +51,7 @@ use std::ops::RangeTo;
 use constellation_common::codec::Decoder;
 use constellation_common::codec::Encoder;
 use constellation_common::codec::ISizeCodec;
+use constellation_common::config::Create;
 use constellation_common::error::ErrorScope;
 use constellation_common::error::ScopedError;
 
@@ -60,7 +61,14 @@ pub trait RoundPartyIDTypes {
     /// This is used to index all parties that are known to the
     /// consensus protocol currently.  Within a given round, parties
     /// are given a [PartyRoundIdx](RoundPartyIDTypes::PartyRoundIdx)
-    type PartyID: Clone + Display + Eq + Hash + Ord + From<usize> + Into<usize>;
+    type PartyID: Clone
+        + Debug
+        + Display
+        + Eq
+        + Hash
+        + Ord
+        + From<usize>
+        + Into<usize>;
     /// Type of IDs for individual rounds.
     type RoundID: Clone + Debug + Display + Hash + Eq + Ord;
 }
@@ -74,6 +82,7 @@ pub trait RoundPartyIdxTypes: RoundPartyIDTypes {
     /// time.  This type exists so that the parties active in each
     /// round may be assigned a contiguous range of integers.
     type PartyRoundIdx: Clone
+        + Debug
         + Display
         + Eq
         + Hash
@@ -92,10 +101,16 @@ pub trait PartyTypes {
     ///
     /// This is in general a complex datatype used to identify
     /// parties.
-    type Party: Clone + Display + Eq + Hash;
+    type Party: Clone + Debug + Display + Eq + Hash;
     /// Codec for encoding and decoding [Party](PartyTypes::Party)s.
     type PartyCodec: Decoder<Self::Party, DecodeError = Self::DecodeError>
-        + Encoder<Self::Party, EncodeError = Self::EncodeError>;
+        + Encoder<Self::Party, EncodeError = Self::EncodeError>
+        + Create<
+            Config = Self::PartyCodecConfig,
+            CreateError = Self::PartyCodecCreateError
+        >;
+    type PartyCodecConfig: Clone + Default;
+    type PartyCodecCreateError: Debug + Display;
     type DecodeError: Debug + Display + ScopedError;
     type EncodeError: Debug + Display + ScopedError;
 }
@@ -319,6 +334,8 @@ impl PartyTypes for TestPartyTypes {
     type EncodeError = <ISizeCodec as Encoder<isize>>::EncodeError;
     type Party = isize;
     type PartyCodec = ISizeCodec;
+    type PartyCodecConfig = ();
+    type PartyCodecCreateError = Infallible;
 }
 
 impl<'a, Party> Iterator for DynamicPartiesIter<'a, Party>
@@ -378,7 +395,7 @@ where
             .map(|val| val.clone().into())
             .max()
             .unwrap_or(0);
-        let mut fwd_map = vec![None; max];
+        let mut fwd_map = vec![None; max + 1];
 
         for (i, id) in parties.iter().enumerate() {
             let idx: usize = id.clone().into();

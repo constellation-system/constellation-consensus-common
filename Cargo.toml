@@ -33,16 +33,20 @@ exclude = [
 [features]
 default = ["gssapi", "log", "openssl", "unix"]
 gssapi = [
+    "constellation-auth/gssapi",
     "constellation-common/gssapi"
 ]
 log = [
     "dep:log",
+    "constellation-auth/log",
     "constellation-common/log"
 ]
 openssl = [
+    "constellation-auth/openssl",
     "constellation-common/openssl"
 ]
 unix = [
+    "constellation-auth/unix",
     "constellation-common/unix"
 ]
 

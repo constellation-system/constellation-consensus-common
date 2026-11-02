@@ -32,6 +32,7 @@
 //! an individual round.  Implementations of per-round state machines
 //! implement [RoundState].
 
+use std::fmt::Debug;
 use std::fmt::Display;
 use std::time::Instant;
 
@@ -56,9 +57,9 @@ where
     /// Type of state-update operations.
     type Oper;
     /// Type of errors that can occur creating a `ProtoState`.
-    type CreateError: Display;
+    type CreateError: Debug + Display;
     /// Errors that can occur applying updates.
-    type UpdateError: Display;
+    type UpdateError: Debug + Display;
 
     /// Create from a configuration.
     fn create(config: Self::Config) -> Result<Self, Self::CreateError>;
@@ -75,7 +76,7 @@ where
 
 /// Trait for recording requests in the protocol state.
 pub trait ProtoStateSubmit<Req> {
-    type SubmitError: Display + ScopedError;
+    type SubmitError: Debug + Display + ScopedError;
 
     /// Record requests into the protocol state.
     ///
@@ -95,22 +96,28 @@ pub trait ProtoStateSubmit<Req> {
 
 /// Subtrait of [ProtoState] allowing inter-round protocol states to
 /// be created from a configuration object.
-pub trait ProtoStateSetParties<Types>
+pub trait ProtoStateParties<Types>
 where
     Types: PartyTypes + RoundPartyIDTypes {
     /// Type of errors that can occur creating a `ProtoState`.
-    type SetPartiesError: Display;
+    type SetPartiesError: Debug + Display;
+
+    /// Get the number of active parties.
+    fn nparties(&self) -> usize;
 
     /// Create from a configuration.
     ///
     /// This returns a map from new IDs to the corresponding old IDs,
     /// or `None` if the new ID is freshly-created.
-    fn set_parties(
+    fn set_parties<'a, I>(
         &mut self,
-        codec: Types::PartyCodec,
+        codec: &mut Types::PartyCodec,
         self_party: Types::Party,
-        party_data: &[Types::Party]
-    ) -> Result<Vec<Option<Types::PartyID>>, Self::SetPartiesError>;
+        party_data: I
+    ) -> Result<Vec<Option<Types::PartyID>>, Self::SetPartiesError>
+    where
+        I: Iterator<Item = &'a Types::Party>,
+        Types::Party: 'a;
 }
 
 /// Subtrait of [ProtoState] allowing individual round states to be
@@ -125,7 +132,7 @@ where
     /// Type of non-mutable round state.
     type Info;
     /// Errors that can occur when creating a round state.
-    type CreateRoundError: Display;
+    type CreateRoundError: Debug + Display;
 
     /// Create a new round state and outbound message buffer.
     fn create_round(
@@ -172,21 +179,6 @@ where
         party: &Types::PartyRoundIdx,
         msg: ProtoTypes::Payload
     ) -> RoundStateUpdate<Self, Oper>;
-}
-
-/// Trait for reporters for consensus round results.
-///
-/// This is used to report
-pub trait RoundResultReporter<RoundID, Oper> {
-    /// Errors that can occur reporting round results.
-    type ReportError: Display;
-
-    /// Report the outcome of a consensus round.
-    fn report(
-        &self,
-        round: RoundID,
-        oper: Oper
-    ) -> Result<(), Self::ReportError>;
 }
 
 /// Outcome of processing a protocol message with
