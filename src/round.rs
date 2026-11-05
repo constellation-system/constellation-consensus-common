@@ -138,7 +138,7 @@ where
     /// Advance to the next round.
     fn advance(
         &mut self
-    ) -> Result<Option<(RoundID, Option<Instant>)>, Self::AdvanceError>;
+    ) -> Result<(Option<RoundID>, Option<Instant>), Self::AdvanceError>;
 }
 
 /// Subtrait of [Rounds] allowing an update to be applied to the round
@@ -496,7 +496,7 @@ where
 
     fn advance(
         &mut self
-    ) -> Result<Option<(Types::RoundID, Option<Instant>)>, Self::AdvanceError>
+    ) -> Result<(Option<Types::RoundID>, Option<Instant>), Self::AdvanceError>
     {
         self.inner
             .lock()
@@ -954,7 +954,7 @@ where
     fn advance(
         &mut self
     ) -> Result<
-        Option<(Types::RoundID, Option<Instant>)>,
+        (Option<Types::RoundID>, Option<Instant>),
         SingleRoundAdvanceError<State::CreateRoundError>
     > {
         trace!(target: "single-round",
@@ -1002,7 +1002,7 @@ where
                            "advanced to round {}",
                            newid);
 
-                    Ok(Some((newid, deadline)))
+                    Ok((Some(newid), deadline))
                 }
                 None => {
                     // IDs are exhausted.
