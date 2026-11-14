@@ -48,7 +48,7 @@ unix = [
 
 [dependencies]
 bitvec = { version = "1.0" }
-constellation-common = { path = "../constellation-common/", default-features = false }
+constellation-common = { git = "https://github.com/constellation-system/constellation-common.git", branch = "project/ioc", default-features = false }
 log = { version = "0.4", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 
