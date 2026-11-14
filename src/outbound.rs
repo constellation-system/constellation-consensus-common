@@ -1,4 +1,4 @@
-// Copyright © 2024-25 The Johns Hopkins Applied Physics Laboratory LLC.
+// Copyright © 2024-26 The Johns Hopkins Applied Physics Laboratory LLC.
 //
 // This program is free software: you can redistribute it and/or
 // modify it under the terms of the GNU Affero General Public License,
@@ -26,6 +26,7 @@
 //!
 //! The [Outbound] trait represents objects that manage this
 //! retransmission and inbound message processing.
+use std::fmt::Debug;
 use std::fmt::Display;
 use std::hash::Hash;
 use std::iter::FusedIterator;
@@ -36,7 +37,9 @@ use bitvec::slice::IterOnes;
 use bitvec::vec::BitVec;
 use constellation_common::error::ScopedError;
 
-use crate::parties::PartyIDMap;
+use crate::parties::PartyRoundIDMap;
+use crate::parties::PartyTypes;
+use crate::parties::RoundPartyIdxTypes;
 use crate::round::RoundMsg;
 
 /// Trait for outbound message buffers.
@@ -45,12 +48,12 @@ use crate::round::RoundMsg;
 /// unreliable network.
 pub trait Outbound<RoundID, Msg>
 where
-    RoundID: Clone + Display + Ord,
+    RoundID: Clone + Debug + Display + Ord,
     Msg: RoundMsg<RoundID> {
     type PartyID: Clone + Display + From<usize> + Into<usize>;
     /// Type of errors that can result from
     /// [collect_outbound](Outbound::collect_outbound).
-    type CollectOutboundError: Display + ScopedError;
+    type CollectOutboundError: Debug + Display + ScopedError;
     /// Type of errors that can result from [recv](Outbound::recv).
     type RecvError: Display;
     /// Type of configuration for creating instances.
@@ -99,12 +102,11 @@ pub struct OutboundGroup<Msg> {
 }
 
 /// Iterator over recipients for an [OutboundGroup].
-pub struct OutboundGroupPartiesIter<'a, PartyID, Party>
+pub struct OutboundGroupPartiesIter<'a, P>
 where
-    PartyID: Clone + From<usize> + Into<usize>,
-    Party: Clone + Eq + Hash {
-    /// The [PartyIDMap] for the round from which this group originates.
-    party_map: &'a PartyIDMap<PartyID, Party>,
+    P: RoundPartyIdxTypes {
+    /// The [PartyRoundIDMap] for the round from which this group originates.
+    party_map: &'a PartyRoundIDMap<P>,
     /// Iterator over the parties to which to send the message.
     parties: IterOnes<'a, usize, Lsb0>
 }
@@ -130,13 +132,12 @@ impl<Msg> OutboundGroup<Msg> {
     /// Get an iterator over all the parties to which the message
     /// needs to be sent.
     #[inline]
-    pub fn iter<'a, PartyID, Party>(
+    pub fn iter<'a, P>(
         &'a self,
-        parties: &'a PartyIDMap<PartyID, Party>
-    ) -> OutboundGroupPartiesIter<'a, PartyID, Party>
+        parties: &'a PartyRoundIDMap<P>
+    ) -> OutboundGroupPartiesIter<'a, P>
     where
-        PartyID: Clone + From<usize> + Into<usize>,
-        Party: Clone + Eq + Hash {
+        P: RoundPartyIdxTypes {
         OutboundGroupPartiesIter {
             parties: self.parties.iter_ones(),
             party_map: parties
@@ -144,16 +145,14 @@ impl<Msg> OutboundGroup<Msg> {
     }
 }
 
-impl<'a, PartyID, Party> Iterator
-    for OutboundGroupPartiesIter<'a, PartyID, Party>
+impl<'a, P> Iterator for OutboundGroupPartiesIter<'a, P>
 where
-    PartyID: Clone + From<usize> + Into<usize>,
-    Party: Clone + Eq + Hash
+    P: RoundPartyIdxTypes
 {
-    type Item = &'a Party;
+    type Item = &'a P::PartyID;
 
     #[inline]
-    fn next(&mut self) -> Option<&'a Party> {
+    fn next(&mut self) -> Option<&'a P::PartyID> {
         match self.parties.next() {
             Some(idx) => self.party_map.idx_party(idx),
             None => None
@@ -174,7 +173,7 @@ where
     fn nth(
         &mut self,
         n: usize
-    ) -> Option<&'a Party> {
+    ) -> Option<&'a P::PartyID> {
         match self.parties.nth(n) {
             Some(idx) => self.party_map.idx_party(idx),
             None => None
@@ -182,7 +181,7 @@ where
     }
 
     #[inline]
-    fn last(self) -> Option<&'a Party> {
+    fn last(self) -> Option<&'a P::PartyID> {
         match self.parties.last() {
             Some(idx) => self.party_map.idx_party(idx),
             None => None
@@ -190,11 +189,9 @@ where
     }
 }
 
-impl<PartyID, Party> ExactSizeIterator
-    for OutboundGroupPartiesIter<'_, PartyID, Party>
+impl<P> ExactSizeIterator for OutboundGroupPartiesIter<'_, P>
 where
-    PartyID: Clone + From<usize> + Into<usize>,
-    Party: Clone + Eq + Hash
+    P: PartyTypes + RoundPartyIdxTypes
 {
     #[inline]
     fn len(&self) -> usize {
@@ -202,10 +199,7 @@ where
     }
 }
 
-impl<PartyID, Party> FusedIterator
-    for OutboundGroupPartiesIter<'_, PartyID, Party>
-where
-    PartyID: Clone + From<usize> + Into<usize>,
-    Party: Clone + Eq + Hash
+impl<P> FusedIterator for OutboundGroupPartiesIter<'_, P> where
+    P: PartyTypes + RoundPartyIdxTypes
 {
 }

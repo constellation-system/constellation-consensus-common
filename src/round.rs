@@ -1,4 +1,4 @@
-// Copyright © 2024-25 The Johns Hopkins Applied Physics Laboratory LLC.
+// Copyright © 2024-26 The Johns Hopkins Applied Physics Laboratory LLC.
 //
 // This program is free software: you can redistribute it and/or
 // modify it under the terms of the GNU Affero General Public License,
@@ -24,19 +24,20 @@
 //! implementations provided here, and provide implementations of
 //! helper objects.
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::collections::hash_map::Entry;
 use std::convert::Infallible;
+use std::fmt::Debug;
 use std::fmt::Display;
 use std::fmt::Error;
 use std::fmt::Formatter;
-use std::hash::Hash;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
 
-use constellation_common::codec::Codec;
+use constellation_common::config::Create;
 use constellation_common::error::ErrorScope;
 use constellation_common::error::ScopedError;
 use constellation_common::error::WithMutexPoison;
@@ -50,23 +51,32 @@ use crate::outbound::OutboundGroup;
 use crate::parties::PartiesMap;
 use crate::parties::PartiesRounds;
 use crate::parties::PartiesUpdate;
-use crate::parties::PartyIDMap;
+use crate::parties::PartyRoundIDMap;
+use crate::parties::PartyTypes;
+use crate::parties::RoundIDGenTypes;
+use crate::parties::RoundPartyIDTypes;
+use crate::parties::RoundPartyIdxTypes;
 use crate::parties::StaticParties;
 use crate::parties::StaticPartiesError;
+use crate::proto::ConsensusProtoMsgTypes;
+use crate::proto::ConsensusProtoOutboundTypes;
 use crate::state::ProtoState;
+use crate::state::ProtoStateParties;
 use crate::state::ProtoStateRound;
-use crate::state::ProtoStateSetParties;
 use crate::state::ProtoStateSubmit;
-use crate::state::RoundResultReporter;
 use crate::state::RoundState;
 use crate::state::RoundStateNotify;
 use crate::state::RoundStateRecv;
 use crate::state::RoundStateUpdate;
 
 /// Trait for messages that have a round ID embedded.
+///
+/// # Type Parameters
+///
+/// - `RoundID`: Type of round IDs.
 pub trait RoundMsg<RoundID>
 where
-    RoundID: Clone + Display + Ord {
+    RoundID: Clone + Debug + Display + Ord {
     /// Type of message payloads.
     ///
     /// This should represent the main body of the protocol message.
@@ -94,7 +104,7 @@ where
 /// implementations of this trait.
 pub trait Rounds {
     /// Errors that can result from [recv](Rounds::recv).
-    type TimeUpdateError: Display;
+    type TimeUpdateError: Debug + Display;
     // XXX Clear finished should also return an error.
 
     /// Clear out any rounds that have fully completed.
@@ -104,18 +114,18 @@ pub trait Rounds {
 
     /// Perform any state updates related to elapsed real time.
     fn time_update(&mut self)
-        -> Result<Option<Instant>, Self::TimeUpdateError>;
+    -> Result<Option<Instant>, Self::TimeUpdateError>;
 }
 
-pub trait RoundsSubmit<Elem> {
+pub trait RoundsSubmit<Req> {
     type SubmitError: Display + ScopedError;
 
-    fn submit_elems<I>(
+    fn submit_reqs<I>(
         &mut self,
-        elems: I
+        reqs: I
     ) -> Result<(), Self::SubmitError>
     where
-        I: Iterator<Item = Elem>;
+        I: Iterator<Item = Req>;
 }
 
 /// Subtrait of [Rounds] allowing advancement to the next round.
@@ -128,14 +138,14 @@ where
     /// Advance to the next round.
     fn advance(
         &mut self
-    ) -> Result<Option<(RoundID, Option<Instant>)>, Self::AdvanceError>;
+    ) -> Result<(Option<RoundID>, Option<Instant>), Self::AdvanceError>;
 }
 
 /// Subtrait of [Rounds] allowing an update to be applied to the round
 /// state.
 pub trait RoundsUpdate<Oper>: Rounds {
     /// Errors that can result from [update](Rounds::update).
-    type UpdateError: Display;
+    type UpdateError: Debug + Display;
 
     /// Update the inter-round state with `oper`.
     fn update(
@@ -144,22 +154,30 @@ pub trait RoundsUpdate<Oper>: Rounds {
     ) -> Result<(), Self::UpdateError>;
 }
 
-/// Trait for objects that manage consensus rounds.
+/// Trait for objects that manage the set of parties for a consensus
+/// round.
 ///
 /// Most protocol implementations do *not* need to provide their own
 /// implementations of this trait.
-pub trait RoundsSetParties<PartyData, C>
+///
+/// # Type Parameters
+///
+/// - `Party`: Type of full party descriptions.
+///
+/// - `Codec`: Type of [Encoder]s and [Decoder]s for party data.
+pub trait RoundsSetParties<Types>
 where
-    PartyData: Clone + Eq + Hash,
-    C: Codec<PartyData> {
-    type SetPartiesError: Display;
+    Types: PartyTypes {
+    type SetPartiesError: Debug + Display;
 
-    fn set_parties(
+    fn set_parties<'a, I>(
         &mut self,
-        codec: C,
-        self_party: PartyData,
-        party_data: &[PartyData]
-    ) -> Result<(), Self::SetPartiesError>;
+        self_party: Types::Party,
+        party_data: I
+    ) -> Result<(), Self::SetPartiesError>
+    where
+        I: Iterator<Item = &'a Types::Party>,
+        Types::Party: 'a;
 }
 
 /// Subtrait of [Rounds] for obtaining the ID mapping for a given
@@ -170,123 +188,94 @@ where
 /// a given round may vary over time, as parties are added or removed
 /// from the pool.  Thus, it is necessary to maintain a mapping from
 /// "permanent" party IDs to per-round party IDs.
-pub trait RoundsParties<RoundID, PartyID, PartyRoundID>:
-    RoundsAdvance<RoundID>
+pub trait RoundsParties<Types>: RoundsAdvance<Types::RoundID>
 where
-    RoundID: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash,
-    PartyRoundID: Clone + Display + From<usize> + Into<usize> {
+    Types: RoundPartyIdxTypes {
     /// Errors can occur getting active parties.
-    type PartiesError: Display;
+    type PartiesError: Debug + Display;
 
     /// Obtain a [PartyIDMap] for a given round.
     ///
     /// This maps permanent party IDs to per-round party IDs.
     fn round_parties(
         &self,
-        round: &RoundID
-    ) -> Result<PartyIDMap<PartyRoundID, PartyID>, Self::PartiesError>;
+        round: &Types::RoundID
+    ) -> Result<PartyRoundIDMap<Types>, Self::PartiesError>;
 }
 
-pub trait RoundsRecv<RoundID, PartyID, Oper, Msg>:
-    RoundsAdvance<RoundID> + RoundsUpdate<Oper>
+pub trait RoundsRecv<Types, ProtoTypes, Oper>:
+    RoundsAdvance<Types::RoundID> + RoundsUpdate<Oper>
 where
-    RoundID: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash,
-    Msg: RoundMsg<RoundID> {
+    Types: RoundPartyIDTypes,
+    ProtoTypes: ConsensusProtoMsgTypes<Types::RoundID> {
     /// Errors that can result from [recv](Rounds::recv).
-    type RecvError<ReportError>: Display
-    where
-        ReportError: Display;
+    type RecvError: Debug + Display;
 
     /// Process an incoming protocol message from `party`.
     ///
     /// This will update both the outbound message buffer as well as
     /// the per-round state.
-    fn recv<Reporter>(
+    fn recv(
         &mut self,
-        reporter: &mut Reporter,
-        party: &PartyID,
-        msg: Msg
-    ) -> Result<(), Self::RecvError<Reporter::ReportError>>
-    where
-        Reporter: RoundResultReporter<RoundID, Oper>;
+        party: &Types::PartyID,
+        msg: ProtoTypes::Msg
+    ) -> Result<Option<(Types::RoundID, Oper)>, Self::RecvError>;
 }
 
 /// Thread-safe wrapper around a [Rounds] implementation.
-pub struct SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
+pub struct SharedRounds<Inner, Types, ProtoTypes, Oper>
 where
+    Types: RoundPartyIdxTypes,
+    ProtoTypes: ConsensusProtoMsgTypes<Types::RoundID>,
     Inner: Rounds
-        + RoundsAdvance<RoundID>
+        + RoundsAdvance<Types::RoundID>
         + RoundsUpdate<Oper>
-        + RoundsParties<RoundID, PartyID, Out::PartyID>
-        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
-    RoundID: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash,
-    Out: Outbound<RoundID, Msg>,
-    Msg: RoundMsg<RoundID> {
-    round_id: PhantomData<RoundID>,
-    party_id: PhantomData<PartyID>,
-    msg: PhantomData<Msg>,
-    out: PhantomData<Out>,
+        + RoundsParties<Types>
+        + RoundsRecv<Types, ProtoTypes, Oper> {
+    types: PhantomData<Types>,
+    proto_types: PhantomData<ProtoTypes>,
     oper: PhantomData<Oper>,
     inner: Arc<Mutex<Inner>>
 }
 
-struct SingleRoundCurr<State, RoundIDs, PartyID, Msg, Out>
+struct SingleRoundCurr<State, Types, ProtoTypes>
 where
-    State: ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>,
-    RoundIDs: Iterator,
-    RoundIDs::Item: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
-    Out: Outbound<RoundIDs::Item, Msg>,
-    Msg: RoundMsg<RoundIDs::Item> {
-    round:
-        Round<State::Round, RoundIDs::Item, State::Oper, Msg, State::Info, Out>,
-    round_id: RoundIDs::Item
+    Types: RoundPartyIdxTypes + PartyTypes + RoundIDGenTypes,
+    ProtoTypes: ConsensusProtoOutboundTypes<Types>,
+    State: ProtoStateRound<Types, ProtoTypes> {
+    round: Round<State::Round, Types, ProtoTypes, State::Oper, State::Info>,
+    round_id: Types::RoundID
 }
 
 /// A [Rounds] instance that only tracks a single round.
 ///
 /// This is intended for simple examples and testing.
-pub struct SingleRound<State, RoundIDs, PartyID, Msg, Out>
+pub struct SingleRound<State, Types, ProtoTypes>
 where
-    State: ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>,
-    RoundIDs: Iterator,
-    RoundIDs::Item: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
-    Out: Outbound<RoundIDs::Item, Msg>,
-    Msg: RoundMsg<RoundIDs::Item> {
+    Types: RoundPartyIdxTypes + PartyTypes + RoundIDGenTypes,
+    ProtoTypes: ConsensusProtoOutboundTypes<Types>,
+    State: ProtoStateRound<Types, ProtoTypes> {
     state: State,
-    round_ids: RoundIDs,
-    send_backlog: Vec<(RoundIDs::Item, Out)>,
-    parties: StaticParties<PartyID>,
-    round: Option<SingleRoundCurr<State, RoundIDs, PartyID, Msg, Out>>
+    round_ids: Types::RoundIDs,
+    party_codec: Types::PartyCodec,
+    send_backlog: Vec<(Types::RoundID, ProtoTypes::Out)>,
+    parties: StaticParties<Types::PartyID>,
+    round: Option<SingleRoundCurr<State, Types, ProtoTypes>>
 }
 
 /// One round in a consensus protocol.
-struct Round<State, RoundID, Oper, Msg, Info, Out>
+struct Round<State, Types, ProtoTypes, Oper, Info>
 where
-    State: RoundStateRecv<RoundID, Out::PartyID, Oper, Msg::Payload, Info, Out>,
-    RoundID: Clone + Display + Ord,
-    Out: Outbound<RoundID, Msg>,
-    Msg: RoundMsg<RoundID> {
-    round: PhantomData<RoundID>,
+    Types: RoundPartyIdxTypes + PartyTypes + RoundIDGenTypes,
+    ProtoTypes: ConsensusProtoOutboundTypes<Types>,
+    State: RoundStateRecv<Types, ProtoTypes, Oper, Info> {
     oper: PhantomData<Oper>,
-    msg: PhantomData<Msg>,
     /// The outbound messages for this round.
-    outbound: Out,
+    outbound: ProtoTypes::Out,
     /// Non-mutable per-round state.
     info: Info,
     /// The protocol round state, if it's still alive.
     state: Option<State>
-}
-
-/// Errors that can occur recieving messages.
-#[derive(Debug)]
-pub enum RecvError<Recv, Report> {
-    Recv { err: Recv },
-    Report { err: Report }
 }
 
 /// Errors that can occur collecting outbound messages in [SingleRound].
@@ -323,7 +312,8 @@ pub enum SingleRoundPartiesError<RoundID> {
 
 /// Errors that can occur creating a [SingleRound].
 #[derive(Debug)]
-pub enum SingleRoundCreateError<State, CreateRound> {
+pub enum SingleRoundCreateError<Codec, State, CreateRound> {
+    Codec { err: Codec },
     CreateRound { err: CreateRound },
     Parties { err: StaticPartiesError },
     State { err: State },
@@ -352,161 +342,121 @@ pub enum SharedRoundsError<Inner> {
     MutexPoison
 }
 
-unsafe impl<Inner, RoundID, PartyID, Oper, Msg, Out> Send
-    for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
+impl<Inner, Types, ProtoTypes, Oper>
+    SharedRounds<Inner, Types, ProtoTypes, Oper>
 where
+    Types: RoundPartyIdxTypes,
+    ProtoTypes: ConsensusProtoMsgTypes<Types::RoundID>,
     Inner: Rounds
-        + RoundsAdvance<RoundID>
+        + RoundsAdvance<Types::RoundID>
         + RoundsUpdate<Oper>
-        + RoundsParties<RoundID, PartyID, Out::PartyID>
-        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
-    RoundID: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash,
-    Out: Outbound<RoundID, Msg>,
-    Msg: RoundMsg<RoundID>
-{
-}
-
-unsafe impl<Inner, RoundID, PartyID, Oper, Msg, Out> Sync
-    for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
-where
-    Inner: Rounds
-        + RoundsAdvance<RoundID>
-        + RoundsUpdate<Oper>
-        + RoundsParties<RoundID, PartyID, Out::PartyID>
-        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
-    RoundID: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash,
-    Out: Outbound<RoundID, Msg>,
-    Msg: RoundMsg<RoundID>
-{
-}
-
-impl<Inner, RoundID, PartyID, Oper, Msg, Out>
-    SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
-where
-    Inner: Rounds
-        + RoundsAdvance<RoundID>
-        + RoundsUpdate<Oper>
-        + RoundsParties<RoundID, PartyID, Out::PartyID>
-        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
-    RoundID: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash,
-    Out: Outbound<RoundID, Msg>,
-    Msg: RoundMsg<RoundID>
+        + RoundsParties<Types>
+        + RoundsRecv<Types, ProtoTypes, Oper>
 {
     /// Create a `SharedRounds` from the inner [Rounds] instance.
     pub fn new(inner: Inner) -> Self {
         SharedRounds {
-            round_id: PhantomData,
-            party_id: PhantomData,
-            msg: PhantomData,
-            out: PhantomData,
+            types: PhantomData,
+            proto_types: PhantomData,
             oper: PhantomData,
             inner: Arc::new(Mutex::new(inner))
         }
     }
 }
 
-impl<Inner, RoundID, PartyID, Oper, Msg, Out> Clone
-    for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
+impl<Inner, Types, ProtoTypes, Oper> Clone
+    for SharedRounds<Inner, Types, ProtoTypes, Oper>
 where
+    Types: RoundPartyIdxTypes,
+    ProtoTypes: ConsensusProtoMsgTypes<Types::RoundID>,
     Inner: Rounds
-        + RoundsAdvance<RoundID>
+        + RoundsAdvance<Types::RoundID>
         + RoundsUpdate<Oper>
-        + RoundsParties<RoundID, PartyID, Out::PartyID>
-        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
-    RoundID: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash,
-    Out: Outbound<RoundID, Msg>,
-    Msg: RoundMsg<RoundID>
+        + RoundsParties<Types>
+        + RoundsRecv<Types, ProtoTypes, Oper>
 {
     #[inline]
     fn clone(&self) -> Self {
         SharedRounds {
-            round_id: self.round_id,
-            party_id: self.party_id,
-            msg: self.msg,
-            out: self.out,
+            types: self.types,
+            proto_types: self.proto_types,
             oper: self.oper,
             inner: self.inner.clone()
         }
     }
 }
 
-impl<Inner, RoundID, PartyID, Oper, Msg, Out, Elem> RoundsSubmit<Elem>
-    for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
+impl<Inner, Types, ProtoTypes, Oper, Req> RoundsSubmit<Req>
+    for SharedRounds<Inner, Types, ProtoTypes, Oper>
 where
+    Types: RoundPartyIdxTypes,
+    ProtoTypes: ConsensusProtoMsgTypes<Types::RoundID>,
     Inner: Rounds
-        + RoundsAdvance<RoundID>
+        + RoundsAdvance<Types::RoundID>
         + RoundsUpdate<Oper>
-        + RoundsSubmit<Elem>
-        + RoundsParties<RoundID, PartyID, Out::PartyID>
-        + RoundsRecv<RoundID, PartyID, Oper, Msg>
-        + SharedMsgs<PartyID, Msg>,
-    RoundID: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash,
-    Out: Outbound<RoundID, Msg>,
-    Msg: RoundMsg<RoundID>
+        + RoundsSubmit<Req>
+        + RoundsParties<Types>
+        + RoundsRecv<Types, ProtoTypes, Oper>
 {
     type SubmitError = WithMutexPoison<Inner::SubmitError>;
 
-    fn submit_elems<I>(
+    fn submit_reqs<I>(
         &mut self,
-        elems: I
+        reqs: I
     ) -> Result<(), Self::SubmitError>
     where
-        I: Iterator<Item = Elem> {
+        I: Iterator<Item = Req> {
         self.inner
             .lock()
             .map_err(|_| WithMutexPoison::MutexPoison)?
-            .submit_elems(elems)
-            .map_err(|err| WithMutexPoison::Inner { error: err })
+            .submit_reqs(reqs)
+            .map_err(|err| WithMutexPoison::Inner { err: err })
     }
 }
 
-impl<Inner, RoundID, PartyID, Oper, Msg, Out> SharedMsgs<PartyID, Msg>
-    for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
+impl<Inner, Types, ProtoTypes, Oper> SharedMsgs<Types::PartyID, ProtoTypes::Msg>
+    for SharedRounds<Inner, Types, ProtoTypes, Oper>
 where
+    Types: RoundPartyIdxTypes,
+    ProtoTypes: ConsensusProtoMsgTypes<Types::RoundID>,
     Inner: Rounds
-        + RoundsAdvance<RoundID>
+        + RoundsAdvance<Types::RoundID>
         + RoundsUpdate<Oper>
-        + RoundsParties<RoundID, PartyID, Out::PartyID>
-        + RoundsRecv<RoundID, PartyID, Oper, Msg>
-        + SharedMsgs<PartyID, Msg>,
-    RoundID: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash,
-    Out: Outbound<RoundID, Msg>,
-    Msg: RoundMsg<RoundID>
+        + RoundsParties<Types>
+        + RoundsRecv<Types, ProtoTypes, Oper>
+        + SharedMsgs<Types::PartyID, ProtoTypes::Msg>
 {
     type MsgsError = WithMutexPoison<Inner::MsgsError>;
 
     fn msgs(
-        &mut self
+        &mut self,
+        live: &HashSet<Types::PartyID>,
+        now: Instant
     ) -> Result<
-        (Option<Vec<(Vec<PartyID>, Vec<Msg>)>>, Option<Instant>),
+        (
+            Option<Vec<(Vec<Types::PartyID>, Vec<ProtoTypes::Msg>)>>,
+            Option<Instant>
+        ),
         Self::MsgsError
     > {
         self.inner
             .lock()
             .map_err(|_| WithMutexPoison::MutexPoison)?
-            .msgs()
-            .map_err(|err| WithMutexPoison::Inner { error: err })
+            .msgs(live, now)
+            .map_err(|err| WithMutexPoison::Inner { err: err })
     }
 }
 
-impl<Inner, RoundID, PartyID, Oper, Msg, Out> Rounds
-    for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
+impl<Inner, Types, ProtoTypes, Oper> Rounds
+    for SharedRounds<Inner, Types, ProtoTypes, Oper>
 where
+    Types: RoundPartyIdxTypes,
+    ProtoTypes: ConsensusProtoMsgTypes<Types::RoundID>,
     Inner: Rounds
-        + RoundsAdvance<RoundID>
+        + RoundsAdvance<Types::RoundID>
         + RoundsUpdate<Oper>
-        + RoundsParties<RoundID, PartyID, Out::PartyID>
-        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
-    RoundID: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash,
-    Out: Outbound<RoundID, Msg>,
-    Msg: RoundMsg<RoundID>
+        + RoundsParties<Types>
+        + RoundsRecv<Types, ProtoTypes, Oper>
 {
     type TimeUpdateError = WithMutexPoison<Inner::TimeUpdateError>;
 
@@ -527,48 +477,45 @@ where
             .lock()
             .map_err(|_| WithMutexPoison::MutexPoison)?
             .time_update()
-            .map_err(|err| WithMutexPoison::Inner { error: err })
+            .map_err(|err| WithMutexPoison::Inner { err: err })
     }
 }
 
-impl<Inner, RoundID, PartyID, Oper, Msg, Out> RoundsAdvance<RoundID>
-    for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
+impl<Inner, Types, ProtoTypes, Oper> RoundsAdvance<Types::RoundID>
+    for SharedRounds<Inner, Types, ProtoTypes, Oper>
 where
+    Types: RoundPartyIdxTypes,
+    ProtoTypes: ConsensusProtoMsgTypes<Types::RoundID>,
     Inner: Rounds
-        + RoundsAdvance<RoundID>
+        + RoundsAdvance<Types::RoundID>
         + RoundsUpdate<Oper>
-        + RoundsParties<RoundID, PartyID, Out::PartyID>
-        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
-    RoundID: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash,
-    Out: Outbound<RoundID, Msg>,
-    Msg: RoundMsg<RoundID>
+        + RoundsParties<Types>
+        + RoundsRecv<Types, ProtoTypes, Oper>
 {
     type AdvanceError = WithMutexPoison<Inner::AdvanceError>;
 
     fn advance(
         &mut self
-    ) -> Result<Option<(RoundID, Option<Instant>)>, Self::AdvanceError> {
+    ) -> Result<(Option<Types::RoundID>, Option<Instant>), Self::AdvanceError>
+    {
         self.inner
             .lock()
             .map_err(|_| WithMutexPoison::MutexPoison)?
             .advance()
-            .map_err(|err| WithMutexPoison::Inner { error: err })
+            .map_err(|err| WithMutexPoison::Inner { err: err })
     }
 }
 
-impl<Inner, RoundID, PartyID, Oper, Msg, Out> RoundsUpdate<Oper>
-    for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
+impl<Inner, Types, ProtoTypes, Oper> RoundsUpdate<Oper>
+    for SharedRounds<Inner, Types, ProtoTypes, Oper>
 where
+    Types: RoundPartyIdxTypes,
+    ProtoTypes: ConsensusProtoMsgTypes<Types::RoundID>,
     Inner: Rounds
-        + RoundsAdvance<RoundID>
+        + RoundsAdvance<Types::RoundID>
         + RoundsUpdate<Oper>
-        + RoundsParties<RoundID, PartyID, Out::PartyID>
-        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
-    RoundID: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash,
-    Out: Outbound<RoundID, Msg>,
-    Msg: RoundMsg<RoundID>
+        + RoundsParties<Types>
+        + RoundsRecv<Types, ProtoTypes, Oper>
 {
     type UpdateError = WithMutexPoison<Inner::UpdateError>;
 
@@ -580,63 +527,57 @@ where
             .lock()
             .map_err(|_| WithMutexPoison::MutexPoison)?
             .update(oper)
-            .map_err(|err| WithMutexPoison::Inner { error: err })
+            .map_err(|err| WithMutexPoison::Inner { err: err })
     }
 }
 
-impl<Inner, RoundID, PartyID, Oper, Msg, Out, PartyData, C>
-    RoundsSetParties<PartyData, C>
-    for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
+impl<Inner, Types, ProtoTypes, Oper> RoundsSetParties<Types>
+    for SharedRounds<Inner, Types, ProtoTypes, Oper>
 where
+    Types: RoundPartyIdxTypes + PartyTypes,
+    ProtoTypes: ConsensusProtoMsgTypes<Types::RoundID>,
     Inner: Rounds
-        + RoundsAdvance<RoundID>
+        + RoundsAdvance<Types::RoundID>
         + RoundsUpdate<Oper>
-        + RoundsParties<RoundID, PartyID, Out::PartyID>
-        + RoundsSetParties<PartyData, C>
-        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
-    RoundID: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash,
-    Out: Outbound<RoundID, Msg>,
-    Msg: RoundMsg<RoundID>,
-    PartyData: Clone + Eq + Hash,
-    C: Codec<PartyData>
+        + RoundsParties<Types>
+        + RoundsSetParties<Types>
+        + RoundsRecv<Types, ProtoTypes, Oper>
 {
     type SetPartiesError = WithMutexPoison<Inner::SetPartiesError>;
 
-    fn set_parties(
+    fn set_parties<'a, I>(
         &mut self,
-        codec: C,
-        self_party: PartyData,
-        party_data: &[PartyData]
-    ) -> Result<(), Self::SetPartiesError> {
+        self_party: Types::Party,
+        party_data: I
+    ) -> Result<(), Self::SetPartiesError>
+    where
+        I: Iterator<Item = &'a Types::Party>,
+        Types::Party: 'a {
         self.inner
             .lock()
             .map_err(|_| WithMutexPoison::MutexPoison)?
-            .set_parties(codec, self_party, party_data)
-            .map_err(|err| WithMutexPoison::Inner { error: err })
+            .set_parties(self_party, party_data)
+            .map_err(|err| WithMutexPoison::Inner { err: err })
     }
 }
 
-impl<Inner, RoundID, PartyID, Oper, Msg, Out>
-    RoundsParties<RoundID, PartyID, Out::PartyID>
-    for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
+impl<Inner, Types, ProtoTypes, Oper> RoundsParties<Types>
+    for SharedRounds<Inner, Types, ProtoTypes, Oper>
 where
+    Types: RoundPartyIdxTypes + PartyTypes,
+    ProtoTypes: ConsensusProtoMsgTypes<Types::RoundID>,
     Inner: Rounds
-        + RoundsAdvance<RoundID>
+        + RoundsAdvance<Types::RoundID>
         + RoundsUpdate<Oper>
-        + RoundsParties<RoundID, PartyID, Out::PartyID>
-        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
-    RoundID: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash,
-    Out: Outbound<RoundID, Msg>,
-    Msg: RoundMsg<RoundID>
+        + RoundsParties<Types>
+        + RoundsRecv<Types, ProtoTypes, Oper>
 {
     type PartiesError = WithMutexPoison<Inner::PartiesError>;
 
     fn round_parties(
         &self,
-        round: &RoundID
-    ) -> Result<PartyIDMap<Out::PartyID, PartyID>, Self::PartiesError> {
+        round: &Types::RoundID
+    ) -> Result<PartyRoundIDMap<Types>, Self::PartiesError> {
         let guard = self
             .inner
             .lock()
@@ -644,62 +585,50 @@ where
 
         guard
             .round_parties(round)
-            .map_err(|err| WithMutexPoison::Inner { error: err })
+            .map_err(|err| WithMutexPoison::Inner { err: err })
     }
 }
 
-impl<Inner, RoundID, PartyID, Oper, Msg, Out>
-    RoundsRecv<RoundID, PartyID, Oper, Msg>
-    for SharedRounds<Inner, RoundID, PartyID, Oper, Msg, Out>
+impl<Inner, Types, ProtoTypes, Oper> RoundsRecv<Types, ProtoTypes, Oper>
+    for SharedRounds<Inner, Types, ProtoTypes, Oper>
 where
+    Types: RoundPartyIdxTypes + PartyTypes,
+    ProtoTypes: ConsensusProtoMsgTypes<Types::RoundID>,
     Inner: Rounds
-        + RoundsAdvance<RoundID>
+        + RoundsAdvance<Types::RoundID>
         + RoundsUpdate<Oper>
-        + RoundsParties<RoundID, PartyID, Out::PartyID>
-        + RoundsRecv<RoundID, PartyID, Oper, Msg>,
-    RoundID: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash,
-    Out: Outbound<RoundID, Msg>,
-    Msg: RoundMsg<RoundID>
+        + RoundsParties<Types>
+        + RoundsRecv<Types, ProtoTypes, Oper>
 {
-    type RecvError<ReportError>
-        = WithMutexPoison<Inner::RecvError<ReportError>>
-    where
-        ReportError: Display;
+    type RecvError = WithMutexPoison<Inner::RecvError>;
 
-    fn recv<Reporter>(
+    fn recv(
         &mut self,
-        reporter: &mut Reporter,
-        party: &PartyID,
-        msg: Msg
-    ) -> Result<(), Self::RecvError<Reporter::ReportError>>
-    where
-        Reporter: RoundResultReporter<RoundID, Oper> {
+        party: &Types::PartyID,
+        msg: ProtoTypes::Msg
+    ) -> Result<Option<(Types::RoundID, Oper)>, Self::RecvError> {
         self.inner
             .lock()
             .map_err(|_| WithMutexPoison::MutexPoison)?
-            .recv(reporter, party, msg)
-            .map_err(|err| WithMutexPoison::Inner { error: err })
+            .recv(party, msg)
+            .map_err(|err| WithMutexPoison::Inner { err: err })
     }
 }
 
-impl<State, RoundID, Oper, Msg, Info, Out>
-    Round<State, RoundID, Oper, Msg, Info, Out>
+impl<State, Types, ProtoTypes, Oper, Info>
+    Round<State, Types, ProtoTypes, Oper, Info>
 where
-    State: RoundStateRecv<RoundID, Out::PartyID, Oper, Msg::Payload, Info, Out>,
-    RoundID: Clone + Display + Ord,
-    Out: Outbound<RoundID, Msg>,
-    Msg: RoundMsg<RoundID>
+    Types: RoundPartyIdxTypes + PartyTypes + RoundIDGenTypes,
+    ProtoTypes: ConsensusProtoOutboundTypes<Types>,
+    State: RoundStateRecv<Types, ProtoTypes, Oper, Info>
 {
     #[inline]
     fn new(
         info: Info,
         state: State,
-        outbound: Out
+        outbound: ProtoTypes::Out
     ) -> Self {
         Round {
-            round: PhantomData,
-            msg: PhantomData,
             oper: PhantomData,
             outbound: outbound,
             state: Some(state),
@@ -710,28 +639,23 @@ where
     #[inline]
     fn collect_outbound<F>(
         &mut self,
-        round: RoundID,
+        round: Types::RoundID,
         func: F
-    ) -> Result<Option<Instant>, Out::CollectOutboundError>
+    ) -> Result<Option<Instant>, ProtoTypes::CollectOutboundError>
     where
-        F: FnMut(OutboundGroup<Msg>) {
+        F: FnMut(OutboundGroup<ProtoTypes::Msg>) {
         self.outbound.collect_outbound(round, func)
     }
 
     #[inline]
-    fn recv<Reporter>(
+    fn recv(
         &mut self,
-        reporter: &mut Reporter,
-        round: &RoundID,
-        party: &Out::PartyID,
-        msg: Msg::Payload
-    ) -> Result<(), RecvError<Out::RecvError, Reporter::ReportError>>
-    where
-        Reporter: RoundResultReporter<RoundID, Oper> {
+        round: &Types::RoundID,
+        party: &Types::PartyRoundIdx,
+        msg: ProtoTypes::Payload
+    ) -> Result<Option<(Types::RoundID, Oper)>, ProtoTypes::RecvError> {
         // Log any acknowledgements in the incoming message.
-        self.outbound
-            .recv(&msg, party)
-            .map_err(|err| RecvError::Recv { err: err })?;
+        self.outbound.recv(&msg, party)?;
 
         // Check if the round is still going.
         match self.state.take() {
@@ -748,13 +672,13 @@ where
                     RoundStateUpdate::Pending { pending } => {
                         self.state = Some(pending);
 
-                        Ok(())
+                        Ok(None)
                     }
                     // Round is resolved, though outbound messages may
                     // still be pending.
-                    RoundStateUpdate::Resolved { resolved: oper } => reporter
-                        .report(round.clone(), oper)
-                        .map_err(|err| RecvError::Report { err: err })
+                    RoundStateUpdate::Resolved { resolved: oper } => {
+                        Ok(Some((round.clone(), oper)))
+                    }
                 }
             }
             // The round is already resolved; nothing to do.
@@ -763,7 +687,7 @@ where
                        "discarding message from {} to concluded round",
                        party);
 
-                Ok(())
+                Ok(None)
             }
         }
     }
@@ -775,25 +699,24 @@ where
     }
 }
 
-impl<State, RoundIDs, PartyID, Msg, Out>
-    SingleRound<State, RoundIDs, PartyID, Msg, Out>
+impl<State, Types, ProtoTypes> SingleRound<State, Types, ProtoTypes>
 where
-    State: ProtoState<RoundIDs::Item, PartyID>
-        + ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>,
-    RoundIDs: Iterator,
-    RoundIDs::Item: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize> + Ord,
-    Out: Outbound<RoundIDs::Item, Msg>,
-    Msg: Clone + RoundMsg<RoundIDs::Item>
+    Types: RoundPartyIdxTypes + PartyTypes + RoundIDGenTypes,
+    ProtoTypes: ConsensusProtoOutboundTypes<Types>,
+    State: ProtoStateRound<Types, ProtoTypes>
 {
     pub fn create(
-        round_ids: RoundIDs,
-        round_config: SingleRoundConfig<State::Config>
+        round_ids: Types::RoundIDs,
+        round_config: SingleRoundConfig<Types::PartyCodecConfig, State::Config>
     ) -> Result<
         Self,
-        SingleRoundCreateError<State::CreateError, State::CreateRoundError>
+        SingleRoundCreateError<
+            Types::PartyCodecCreateError,
+            State::CreateError,
+            State::CreateRoundError
+        >
     > {
-        let (backlog_size, state_config) = round_config.take();
+        let (party_codec, backlog_size, state_config) = round_config.take();
         // Create the initial protocol state.
         let proto_state = State::create(state_config)
             .map_err(|err| SingleRoundCreateError::State { err: err })?;
@@ -801,10 +724,13 @@ where
             Some(size) => Vec::with_capacity(size),
             None => Vec::new()
         };
+        let party_codec = Types::PartyCodec::create(party_codec)
+            .map_err(|err| SingleRoundCreateError::Codec { err: err })?;
 
         Ok(SingleRound {
             send_backlog: backlog,
             state: proto_state,
+            party_codec: party_codec,
             parties: StaticParties::default(),
             round: None,
             round_ids: round_ids
@@ -812,11 +738,11 @@ where
     }
 
     fn collect_outbound_msgs(
-        group_map: &mut HashMap<Vec<PartyID>, Vec<Msg>>,
-        parties_map: &PartyIDMap<Out::PartyID, PartyID>,
-        group: OutboundGroup<Msg>
+        group_map: &mut HashMap<Vec<Types::PartyID>, Vec<ProtoTypes::Msg>>,
+        parties_map: &PartyRoundIDMap<Types>,
+        group: OutboundGroup<ProtoTypes::Msg>
     ) {
-        let mut party_idxs: Vec<PartyID> =
+        let mut party_idxs: Vec<Types::PartyID> =
             group.iter(parties_map).cloned().collect();
 
         party_idxs.sort();
@@ -832,32 +758,27 @@ where
     }
 }
 
-impl<State, RoundIDs, PartyID, Msg, Out, Elem> RoundsSubmit<Elem>
-    for SingleRound<State, RoundIDs, PartyID, Msg, Out>
+impl<State, Types, ProtoTypes, Req> RoundsSubmit<Req>
+    for SingleRound<State, Types, ProtoTypes>
 where
-    State: ProtoState<RoundIDs::Item, PartyID>
-        + ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>
-        + ProtoStateSubmit<Elem>,
-    RoundIDs: Iterator,
-    RoundIDs::Item: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize> + Ord,
-    Out: Outbound<RoundIDs::Item, Msg>,
-    Msg: Clone + RoundMsg<RoundIDs::Item>
+    Types: RoundPartyIdxTypes + PartyTypes + RoundIDGenTypes,
+    ProtoTypes: ConsensusProtoOutboundTypes<Types>,
+    State: ProtoStateRound<Types, ProtoTypes> + ProtoStateSubmit<Req>
 {
     type SubmitError = SingleRoundSubmitError<
         State::SubmitError,
-        <State::Round as RoundStateNotify<Out, State>>::NotifyError
+        <State::Round as RoundStateNotify<ProtoTypes::Out, State>>::NotifyError
     >;
 
     #[inline]
-    fn submit_elems<I>(
+    fn submit_reqs<I>(
         &mut self,
-        elems: I
+        reqs: I
     ) -> Result<(), Self::SubmitError>
     where
-        I: Iterator<Item = Elem> {
+        I: Iterator<Item = Req> {
         self.state
-            .submit_elems(elems)
+            .submit_reqs(reqs)
             .map_err(|err| SingleRoundSubmitError::Submit { err: err })?;
 
         if let Some(curr) = &mut self.round {
@@ -878,26 +799,30 @@ where
     }
 }
 
-impl<State, RoundIDs, PartyID, Msg, Out> SharedMsgs<PartyID, Msg>
-    for SingleRound<State, RoundIDs, PartyID, Msg, Out>
+impl<State, Types, ProtoTypes> SharedMsgs<Types::PartyID, ProtoTypes::Msg>
+    for SingleRound<State, Types, ProtoTypes>
 where
-    State: ProtoState<RoundIDs::Item, PartyID>
-        + ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>,
-    RoundIDs: Iterator,
-    RoundIDs::Item: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize> + Ord,
-    Out: Outbound<RoundIDs::Item, Msg>,
-    Msg: Clone + RoundMsg<RoundIDs::Item>
+    Types: RoundPartyIdxTypes + PartyTypes + RoundIDGenTypes,
+    ProtoTypes: ConsensusProtoOutboundTypes<Types>,
+    State: ProtoState<Types>
+        + ProtoStateRound<Types, ProtoTypes>
+        + ProtoStateParties<Types>
 {
     type MsgsError = SingleRoundCollectOutboundError<
-        RoundIDs::Item,
-        Out::CollectOutboundError
+        Types::RoundID,
+        ProtoTypes::CollectOutboundError
     >;
 
+    // XXX Wire these parameters into the rest of the process
     fn msgs(
-        &mut self
+        &mut self,
+        _live: &HashSet<Types::PartyID>,
+        _now: Instant
     ) -> Result<
-        (Option<Vec<(Vec<PartyID>, Vec<Msg>)>>, Option<Instant>),
+        (
+            Option<Vec<(Vec<Types::PartyID>, Vec<ProtoTypes::Msg>)>>,
+            Option<Instant>
+        ),
         Self::MsgsError
     > {
         let mut group_map = HashMap::new();
@@ -981,16 +906,11 @@ where
     }
 }
 
-impl<State, RoundIDs, PartyID, Msg, Out> Rounds
-    for SingleRound<State, RoundIDs, PartyID, Msg, Out>
+impl<State, Types, ProtoTypes> Rounds for SingleRound<State, Types, ProtoTypes>
 where
-    State: ProtoState<RoundIDs::Item, PartyID>
-        + ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>,
-    RoundIDs: Iterator,
-    RoundIDs::Item: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
-    Out: Outbound<RoundIDs::Item, Msg>,
-    Msg: RoundMsg<RoundIDs::Item>
+    Types: RoundPartyIdxTypes + PartyTypes + RoundIDGenTypes,
+    ProtoTypes: ConsensusProtoOutboundTypes<Types>,
+    State: ProtoStateRound<Types, ProtoTypes>
 {
     type TimeUpdateError = Infallible;
 
@@ -1022,27 +942,21 @@ where
     }
 }
 
-impl<State, RoundIDs, PartyID, Msg, Out> RoundsAdvance<RoundIDs::Item>
-    for SingleRound<State, RoundIDs, PartyID, Msg, Out>
+impl<State, Types, ProtoTypes> RoundsAdvance<Types::RoundID>
+    for SingleRound<State, Types, ProtoTypes>
 where
-    State: ProtoState<RoundIDs::Item, PartyID>
-        + ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>,
-    RoundIDs: Iterator,
-    RoundIDs::Item: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
-    Out: Outbound<RoundIDs::Item, Msg>,
-    Msg: RoundMsg<RoundIDs::Item>
+    Types: RoundPartyIdxTypes + PartyTypes + RoundIDGenTypes,
+    ProtoTypes: ConsensusProtoOutboundTypes<Types>,
+    State: ProtoStateRound<Types, ProtoTypes>
 {
     type AdvanceError = SingleRoundAdvanceError<State::CreateRoundError>;
 
     fn advance(
         &mut self
     ) -> Result<
-        Option<(RoundIDs::Item, Option<Instant>)>,
+        (Option<Types::RoundID>, Option<Instant>),
         SingleRoundAdvanceError<State::CreateRoundError>
     > {
-        let round = &self.round;
-
         trace!(target: "single-round",
                "trying to advance round");
 
@@ -1056,7 +970,7 @@ where
                     // Create the next round state and outbound buffer.
                     let party_map = self
                         .parties
-                        .parties_map(&round)
+                        .parties_map(&newid)
                         .expect("infallible error");
 
                     let (round_state, info, outbound, deadline) =
@@ -1088,7 +1002,7 @@ where
                            "advanced to round {}",
                            newid);
 
-                    Ok(Some((newid, deadline)))
+                    Ok((Some(newid), deadline))
                 }
                 None => {
                     // IDs are exhausted.
@@ -1101,16 +1015,12 @@ where
     }
 }
 
-impl<State, RoundIDs, PartyID, Msg, Out> RoundsUpdate<State::Oper>
-    for SingleRound<State, RoundIDs, PartyID, Msg, Out>
+impl<State, Types, ProtoTypes> RoundsUpdate<State::Oper>
+    for SingleRound<State, Types, ProtoTypes>
 where
-    State: ProtoState<RoundIDs::Item, PartyID>
-        + ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>,
-    RoundIDs: Iterator,
-    RoundIDs::Item: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
-    Out: Outbound<RoundIDs::Item, Msg>,
-    Msg: RoundMsg<RoundIDs::Item>
+    Types: RoundPartyIdxTypes + PartyTypes + RoundIDGenTypes,
+    ProtoTypes: ConsensusProtoOutboundTypes<Types>,
+    State: ProtoStateRound<Types, ProtoTypes>
 {
     type UpdateError = State::UpdateError;
 
@@ -1122,31 +1032,30 @@ where
     }
 }
 
-impl<State, RoundIDs, PartyID, Msg, Out, PartyData, C>
-    RoundsSetParties<PartyData, C>
-    for SingleRound<State, RoundIDs, PartyID, Msg, Out>
+impl<State, Types, ProtoTypes> RoundsSetParties<Types>
+    for SingleRound<State, Types, ProtoTypes>
 where
-    State: ProtoState<RoundIDs::Item, PartyID>
-        + ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>
-        + ProtoStateSetParties<PartyID, PartyData, C>,
-    RoundIDs: Iterator,
-    RoundIDs::Item: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
-    Out: Outbound<RoundIDs::Item, Msg>,
-    Msg: RoundMsg<RoundIDs::Item>,
-    PartyData: Clone + Eq + Hash,
-    C: Codec<PartyData>
+    Types: RoundPartyIdxTypes + PartyTypes + RoundIDGenTypes,
+    ProtoTypes: ConsensusProtoOutboundTypes<Types>,
+    State: ProtoStateRound<Types, ProtoTypes> + ProtoStateParties<Types>
 {
     type SetPartiesError = State::SetPartiesError;
 
-    fn set_parties(
+    fn set_parties<'a, I>(
         &mut self,
-        codec: C,
-        self_party: PartyData,
-        party_data: &[PartyData]
-    ) -> Result<(), Self::SetPartiesError> {
-        let remap = self.state.set_parties(codec, self_party, party_data)?;
-        let parties = (0..party_data.len()).map(PartyID::from).collect();
+        self_party: Types::Party,
+        parties: I
+    ) -> Result<(), Self::SetPartiesError>
+    where
+        I: Iterator<Item = &'a Types::Party>,
+        Types::Party: 'a {
+        let remap = self.state.set_parties(
+            &mut self.party_codec,
+            self_party,
+            parties
+        )?;
+        let nparties = self.state.nparties();
+        let parties = (0..nparties).map(Types::PartyID::from).collect();
 
         self.parties.update_parties(parties, &remap);
 
@@ -1154,63 +1063,48 @@ where
     }
 }
 
-impl<State, RoundIDs, PartyID, Msg, Out>
-    RoundsParties<RoundIDs::Item, PartyID, Out::PartyID>
-    for SingleRound<State, RoundIDs, PartyID, Msg, Out>
+impl<State, Types, ProtoTypes> RoundsParties<Types>
+    for SingleRound<State, Types, ProtoTypes>
 where
-    State: ProtoState<RoundIDs::Item, PartyID>
-        + ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>,
-    RoundIDs: Iterator,
-    RoundIDs::Item: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
-    Out: Outbound<RoundIDs::Item, Msg>,
-    Msg: RoundMsg<RoundIDs::Item>
+    Types: RoundPartyIdxTypes + PartyTypes + RoundIDGenTypes,
+    ProtoTypes: ConsensusProtoOutboundTypes<Types>,
+    State: ProtoStateRound<Types, ProtoTypes>
 {
-    type PartiesError = SingleRoundPartiesError<RoundIDs::Item>;
+    type PartiesError = SingleRoundPartiesError<Types::RoundID>;
 
     fn round_parties(
         &self,
-        round: &RoundIDs::Item
-    ) -> Result<PartyIDMap<Out::PartyID, PartyID>, Self::PartiesError> {
+        round: &Types::RoundID
+    ) -> Result<PartyRoundIDMap<Types>, Self::PartiesError> {
         Ok(self.parties.parties_map(round).expect("infallible error"))
     }
 }
 
-impl<State, RoundIDs, PartyID, Msg, Out>
-    RoundsRecv<RoundIDs::Item, PartyID, State::Oper, Msg>
-    for SingleRound<State, RoundIDs, PartyID, Msg, Out>
+impl<State, Types, ProtoTypes> RoundsRecv<Types, ProtoTypes, State::Oper>
+    for SingleRound<State, Types, ProtoTypes>
 where
-    State: ProtoState<RoundIDs::Item, PartyID>
-        + ProtoStateRound<RoundIDs::Item, PartyID, Msg, Out>,
-    RoundIDs: Iterator,
-    RoundIDs::Item: Clone + Display + Ord,
-    PartyID: Clone + Display + Eq + Hash + From<usize> + Into<usize>,
-    Out: Outbound<RoundIDs::Item, Msg>,
-    Msg: RoundMsg<RoundIDs::Item>
+    Types: RoundPartyIdxTypes + PartyTypes + RoundIDGenTypes,
+    ProtoTypes: ConsensusProtoOutboundTypes<Types>,
+    State: ProtoStateRound<Types, ProtoTypes>
 {
-    type RecvError<ReportError>
-        = SingleRoundRecvError<
-        RoundIDs::Item,
-        RecvError<Out::RecvError, ReportError>,
-        PartyID
-    >
-    where
-        ReportError: Display;
+    type RecvError = SingleRoundRecvError<
+        Types::RoundID,
+        ProtoTypes::RecvError,
+        Types::PartyID
+    >;
 
-    fn recv<Reporter>(
+    fn recv(
         &mut self,
-        reporter: &mut Reporter,
-        party: &PartyID,
-        msg: Msg
-    ) -> Result<(), Self::RecvError<Reporter::ReportError>>
-    where
-        Reporter: RoundResultReporter<RoundIDs::Item, State::Oper> {
+        party: &Types::PartyID,
+        msg: ProtoTypes::Msg
+    ) -> Result<Option<(Types::RoundID, State::Oper)>, Self::RecvError> {
         // Get the round ID from the message.
         let (target_id, payload) = msg.take();
         // Get the party map to convert the party to the round-specific ID.
         let parties = self
             .round_parties(&target_id)
             .map_err(|err| SingleRoundRecvError::Parties { err: err })?;
+        // Convert to the round-specific ID.
         let party = match parties.party_idx(party) {
             Some(idx) => Ok(idx),
             None => Err(SingleRoundRecvError::NotFound {
@@ -1227,7 +1121,7 @@ where
                        round_id);
 
                 round
-                    .recv(reporter, &target_id, party, payload)
+                    .recv(&target_id, party, payload)
                     .map_err(|err| SingleRoundRecvError::Inner { err: err })
             }
             _ => {
@@ -1239,14 +1133,12 @@ where
                 for (backlog_round, outbound) in self.send_backlog.iter_mut() {
                     if backlog_round == &target_id {
                         outbound.recv(&payload, party).map_err(|err| {
-                            SingleRoundRecvError::Inner {
-                                err: RecvError::Recv { err: err }
-                            }
+                            SingleRoundRecvError::Inner { err: err }
                         })?;
                     }
                 }
 
-                Ok(())
+                Ok(None)
             }
         }
     }
@@ -1299,7 +1191,7 @@ where
     ) -> Result<(), Error> {
         match self {
             SingleRoundAdvanceError::CreateRound { err } => err.fmt(f),
-            SingleRoundAdvanceError::Parties { err } => err.fmt(f),
+            SingleRoundAdvanceError::Parties { err } => write!(f, "{}", err),
             SingleRoundAdvanceError::NotFinished => {
                 write!(f, "round not finished")
             }
@@ -1308,8 +1200,10 @@ where
     }
 }
 
-impl<State, CreateRound> Display for SingleRoundCreateError<State, CreateRound>
+impl<Codec, State, CreateRound> Display
+    for SingleRoundCreateError<Codec, State, CreateRound>
 where
+    Codec: Display,
     CreateRound: Display,
     State: Display
 {
@@ -1318,8 +1212,9 @@ where
         f: &mut Formatter<'_>
     ) -> Result<(), Error> {
         match self {
+            SingleRoundCreateError::Codec { err } => err.fmt(f),
             SingleRoundCreateError::CreateRound { err } => err.fmt(f),
-            SingleRoundCreateError::Parties { err } => err.fmt(f),
+            SingleRoundCreateError::Parties { err } => write!(f, "{}", err),
             SingleRoundCreateError::State { err } => err.fmt(f),
             SingleRoundCreateError::NoState => {
                 write!(f, "no initial state created")
@@ -1338,7 +1233,7 @@ where
         f: &mut Formatter<'_>
     ) -> Result<(), Error> {
         match self {
-            SingleRoundPartiesError::Parties { err } => err.fmt(f),
+            SingleRoundPartiesError::Parties { err } => write!(f, "{}", err),
             SingleRoundPartiesError::BadRound { round } => {
                 write!(f, "wrong round {}", round)
             }
@@ -1395,22 +1290,6 @@ where
             SingleRoundRecvError::NotFound { party } => {
                 write!(f, "party {} not found", party)
             }
-        }
-    }
-}
-
-impl<Recv, Report> Display for RecvError<Recv, Report>
-where
-    Recv: Display,
-    Report: Display
-{
-    fn fmt(
-        &self,
-        f: &mut Formatter<'_>
-    ) -> Result<(), Error> {
-        match self {
-            RecvError::Recv { err } => err.fmt(f),
-            RecvError::Report { err } => err.fmt(f)
         }
     }
 }

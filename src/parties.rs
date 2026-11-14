@@ -1,4 +1,4 @@
-// Copyright © 2024-25 The Johns Hopkins Applied Physics Laboratory LLC.
+// Copyright © 2024-26 The Johns Hopkins Applied Physics Laboratory LLC.
 //
 // This program is free software: you can redistribute it and/or
 // modify it under the terms of the GNU Affero General Public License,
@@ -33,9 +33,10 @@
 //!    are *potentially different* from the more permanent set of IDs assigned
 //!    to parties.
 use std::cmp::Ordering;
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::convert::Infallible;
+use std::fmt::Debug;
 use std::fmt::Display;
 use std::fmt::Error;
 use std::fmt::Formatter;
@@ -47,8 +48,72 @@ use std::ops::Range;
 use std::ops::RangeFrom;
 use std::ops::RangeTo;
 
+use constellation_common::codec::Decoder;
+use constellation_common::codec::Encoder;
+use constellation_common::codec::ISizeCodec;
+use constellation_common::config::Create;
 use constellation_common::error::ErrorScope;
 use constellation_common::error::ScopedError;
+
+pub trait RoundPartyIDTypes {
+    /// Type of IDs used to index a [Party](RoundPartyIDTypes::Party) generally.
+    ///
+    /// This is used to index all parties that are known to the
+    /// consensus protocol currently.  Within a given round, parties
+    /// are given a [PartyRoundIdx](RoundPartyIDTypes::PartyRoundIdx)
+    type PartyID: Clone
+        + Debug
+        + Display
+        + Eq
+        + Hash
+        + Ord
+        + From<usize>
+        + Into<usize>;
+    /// Type of IDs for individual rounds.
+    type RoundID: Clone + Debug + Display + Hash + Eq + Ord;
+}
+
+pub trait RoundPartyIdxTypes: RoundPartyIDTypes {
+    /// Type of IDs used to index a (RoundPartyIDTypes::Party) in a
+    /// given round.
+    ///
+    /// The set of parties active in a given consensus round and the
+    /// set of parties known to the protocol generally may differ over
+    /// time.  This type exists so that the parties active in each
+    /// round may be assigned a contiguous range of integers.
+    type PartyRoundIdx: Clone
+        + Debug
+        + Display
+        + Eq
+        + Hash
+        + Ord
+        + From<usize>
+        + Into<usize>;
+}
+
+pub trait RoundIDGenTypes: RoundPartyIDTypes {
+    /// Generator used to obtain [RoundID](RoundPartyIDTypes::RoundID)s.
+    type RoundIDs: Iterator<Item = Self::RoundID>;
+}
+
+pub trait PartyTypes {
+    /// Type of party data.
+    ///
+    /// This is in general a complex datatype used to identify
+    /// parties.
+    type Party: Clone + Debug + Display + Eq + Hash;
+    /// Codec for encoding and decoding [Party](PartyTypes::Party)s.
+    type PartyCodec: Decoder<Self::Party, DecodeError = Self::DecodeError>
+        + Encoder<Self::Party, EncodeError = Self::EncodeError>
+        + Create<
+            Config = Self::PartyCodecConfig,
+            CreateError = Self::PartyCodecCreateError
+        >;
+    type PartyCodecConfig: Clone + Default;
+    type PartyCodecCreateError: Debug + Display;
+    type DecodeError: Debug + Display + ScopedError;
+    type EncodeError: Debug + Display + ScopedError;
+}
 
 /// Base trait for tracking parties through consensus rounds.
 pub trait PartiesUpdate<Party> {
@@ -103,17 +168,19 @@ pub trait PartiesRounds<Round> {
 /// Trait for the set of parties participating in a consensus protocol.
 ///
 /// This allows parties to be added and removed at given rounds.
-pub trait Parties<Round, Party>:
-    PartiesUpdate<Party> + PartiesRounds<Round> {
+pub trait Parties<T>:
+    PartiesUpdate<T::PartyID> + PartiesRounds<T::RoundID>
+where
+    T: RoundPartyIDTypes {
     /// Type of errors that can be returned by
     /// [start_party_at](DynamicParties::start_party_at) and
     /// [stop_party_at](Parties::stop_party_at).
     type PartyRoundError: Display;
     /// Type of iterators over parties.
-    type PartiesIter<'a>: Iterator<Item = &'a Party>
+    type PartiesIter<'a>: Iterator<Item = &'a T::PartyID>
     where
         Self: 'a,
-        Party: 'a;
+        T::PartyID: 'a;
 
     /// Set `party` to be valid starting at round `round`.
     ///
@@ -121,8 +188,8 @@ pub trait Parties<Round, Party>:
     /// happen in ascending order, otherwise an error may occur.
     fn start_party_at(
         &mut self,
-        party: Party,
-        round: &Round
+        party: T::PartyID,
+        round: &T::RoundID
     ) -> Result<(), Self::PartyRoundError>;
 
     /// Set `party` to be invalid starting at round `round`.
@@ -131,14 +198,14 @@ pub trait Parties<Round, Party>:
     /// happen in ascending order, otherwise an error may occur.
     fn stop_party_at(
         &mut self,
-        party: Party,
-        round: &Round
+        party: T::PartyID,
+        round: &T::RoundID
     ) -> Result<(), Self::PartyRoundError>;
 
     /// Get all active parties at round `round`.
     fn parties(
         &self,
-        round: &Round
+        round: &T::RoundID
     ) -> Result<Self::PartiesIter<'_>, Self::RoundError>;
 }
 
@@ -147,33 +214,29 @@ pub trait Parties<Round, Party>:
 /// In general, the dense IDs given to parties will vary from round to
 /// round.  This means that a [PartyIDMap] needs to be obtained for
 /// each round.
-pub trait PartiesMap<Round, PartyID, Party>: Parties<Round, Party>
+pub trait PartiesMap<T>: Parties<T>
 where
-    PartyID: Clone + From<usize> + Into<usize> {
-    /// Get the [PartyIDMap] for round `round`.
+    T: RoundPartyIdxTypes {
+    /// Get the [PartyRoundIDMap] for round `round`.
     #[inline]
     fn parties_map(
         &self,
-        round: &Round
-    ) -> Result<PartyIDMap<PartyID, Party>, Self::RoundError>
-    where
-        Party: Clone + Eq + Hash {
-        Ok(PartyIDMap::from_iter(self.parties(round)?))
+        round: &T::RoundID
+    ) -> Result<PartyRoundIDMap<T>, Self::RoundError> {
+        Ok(PartyRoundIDMap::from_iter(self.parties(round)?))
     }
 }
 
-/// A map from parties in a round to a dense integer range of `[1..n]`.
+/// A map between [PartyID](RoundPartyIDTypes::PartyID)s and
+/// [PartyRoundIdx](RoundPartyIDTypes::PartyRoundIdx)s.
 ///
-/// This is intended primarily for mapping party IDs to a more
-/// convenient representation for per-round data structures.
-pub struct PartyIDMap<PartyID, Party>
+/// This is used to generate per-round party indexes that occupy a
+/// dense range.
+pub struct PartyRoundIDMap<Types>
 where
-    PartyID: Clone + From<usize> + Into<usize>,
-    Party: Clone + Eq + Hash {
-    /// Map from [Party] to index.
-    fwd_map: HashMap<Party, PartyID>,
-    /// Map from index to [Party].
-    rev_map: Vec<Party>
+    Types: RoundPartyIdxTypes {
+    fwd_map: Vec<Option<Types::PartyRoundIdx>>,
+    rev_map: Vec<Types::PartyID>
 }
 
 /// Structure for intervals of rounds where a party is valid.
@@ -207,16 +270,14 @@ enum RoundIntervals {
 ///
 /// Finally, the set of valid parties for any round can be obtained with
 /// [parties](DynamicParties::parties).
-pub struct DynamicParties<Round, PartyID, Party>
+pub struct DynamicParties<T>
 where
-    PartyID: Clone + From<usize> + Into<usize>,
-    Party: Clone + Eq + Hash,
-    Round: Clone + Eq + Hash {
-    party_id: PhantomData<PartyID>,
+    T: RoundPartyIDTypes {
+    party_id: PhantomData<T::PartyID>,
     /// Map of rounds
-    rounds: HashMap<Round, usize>,
+    rounds: HashMap<T::RoundID, usize>,
     /// Hash table of parties.
-    parties: HashMap<Party, RoundIntervals>,
+    parties: HashMap<T::PartyID, RoundIntervals>,
     /// Next round.
     // ISSUE #1: replace this with shifting the RoundIntervals down.
     next: usize
@@ -257,6 +318,26 @@ pub enum DynamicPartiesError {
     RoundOutsideWindow
 }
 
+pub struct TestPartyTypes;
+
+impl RoundPartyIDTypes for TestPartyTypes {
+    type PartyID = usize;
+    type RoundID = usize;
+}
+
+impl RoundPartyIdxTypes for TestPartyTypes {
+    type PartyRoundIdx = usize;
+}
+
+impl PartyTypes for TestPartyTypes {
+    type DecodeError = <ISizeCodec as Decoder<isize>>::DecodeError;
+    type EncodeError = <ISizeCodec as Encoder<isize>>::EncodeError;
+    type Party = isize;
+    type PartyCodec = ISizeCodec;
+    type PartyCodecConfig = ();
+    type PartyCodecCreateError = Infallible;
+}
+
 impl<'a, Party> Iterator for DynamicPartiesIter<'a, Party>
 where
     Party: Clone + Eq + Hash
@@ -292,32 +373,38 @@ impl<Party> FusedIterator for DynamicPartiesIter<'_, Party> where
 {
 }
 
-impl<PartyID, Party> PartyIDMap<PartyID, Party>
+impl<T> PartyRoundIDMap<T>
 where
-    PartyID: Clone + From<usize> + Into<usize>,
-    Party: Clone + Eq + Hash
+    T: RoundPartyIdxTypes
 {
-    /// Create a `PartyIDMap` from an iterator over the parties in a
-    /// round.
+    /// Create a `PartyRoundIDMap` from an iterator over the parties
+    /// in a round.
     #[inline]
-    fn from_iter<'a, I>(iter: I) -> PartyIDMap<PartyID, Party>
+    fn from_iter<'a, I>(iter: I) -> PartyRoundIDMap<T>
     where
-        I: Iterator<Item = &'a Party>,
-        Party: 'a {
+        I: Iterator<Item = &'a T::PartyID>,
+        T::PartyID: 'a {
         Self::create(iter.cloned().collect())
     }
 
-    /// Create a `PartyIDMap` from a [Vec] containing all the parties
-    /// in a round.
-    fn create(parties: Vec<Party>) -> PartyIDMap<PartyID, Party> {
-        let mut map = HashMap::with_capacity(parties.len());
+    /// Create a `PartyRoundIDMap` from a [Vec] containing all the
+    /// parties in a round.
+    fn create(parties: Vec<T::PartyID>) -> PartyRoundIDMap<T> {
+        let max = parties
+            .iter()
+            .map(|val| val.clone().into())
+            .max()
+            .unwrap_or(0);
+        let mut fwd_map = vec![None; max + 1];
 
-        for (i, party) in parties.iter().enumerate() {
-            map.insert(party.clone(), i.into());
+        for (i, id) in parties.iter().enumerate() {
+            let idx: usize = id.clone().into();
+
+            fwd_map[idx] = Some(T::PartyRoundIdx::from(i));
         }
 
-        PartyIDMap {
-            fwd_map: map,
+        PartyRoundIDMap {
+            fwd_map: fwd_map,
             rev_map: parties
         }
     }
@@ -332,9 +419,15 @@ where
     #[inline]
     pub fn party_idx(
         &self,
-        party: &Party
-    ) -> Option<&PartyID> {
-        self.fwd_map.get(party)
+        party: &T::PartyID
+    ) -> Option<&T::PartyRoundIdx> {
+        let idx: usize = party.clone().into();
+
+        if idx < self.fwd_map.len() {
+            self.fwd_map[idx].as_ref()
+        } else {
+            None
+        }
     }
 
     /// Get the party represented by `idx`.
@@ -342,7 +435,7 @@ where
     pub fn idx_party(
         &self,
         idx: usize
-    ) -> Option<&Party> {
+    ) -> Option<&T::PartyID> {
         if idx < self.rev_map.len() {
             Some(&self.rev_map[idx])
         } else {
@@ -351,11 +444,9 @@ where
     }
 }
 
-impl<Round, PartyID, Party> Default for DynamicParties<Round, PartyID, Party>
+impl<T> Default for DynamicParties<T>
 where
-    PartyID: Clone + From<usize> + Into<usize>,
-    Party: Clone + Eq + Hash,
-    Round: Clone + Eq + Hash + Into<usize>
+    T: PartyTypes + RoundPartyIDTypes
 {
     #[inline]
     fn default() -> Self {
@@ -368,11 +459,9 @@ where
     }
 }
 
-impl<Round, PartyID, Party> DynamicParties<Round, PartyID, Party>
+impl<T> DynamicParties<T>
 where
-    PartyID: Clone + From<usize> + Into<usize>,
-    Party: Clone + Eq + Hash,
-    Round: Clone + Eq + Hash + Into<usize>
+    T: PartyTypes + RoundPartyIDTypes
 {
     /// Create a new `DynamicParties`.
     #[inline]
@@ -467,22 +556,22 @@ where
     }
 }
 
-impl<Round, Party> Parties<Round, Party> for StaticParties<Party>
+impl<T> Parties<T> for StaticParties<T::PartyID>
 where
-    Party: Clone + Eq + Hash
+    T: RoundPartyIDTypes
 {
     type PartiesIter<'a>
-        = std::slice::Iter<'a, Party>
+        = std::slice::Iter<'a, T::PartyID>
     where
         Self: 'a,
-        Party: 'a;
+        T::PartyID: 'a;
     type PartyRoundError = StaticPartiesError;
 
     #[inline]
     fn start_party_at(
         &mut self,
-        _party: Party,
-        _round: &Round
+        _party: T::PartyID,
+        _round: &T::RoundID
     ) -> Result<(), StaticPartiesError> {
         Err(StaticPartiesError::Static)
     }
@@ -490,8 +579,8 @@ where
     #[inline]
     fn stop_party_at(
         &mut self,
-        _party: Party,
-        _round: &Round
+        _party: T::PartyID,
+        _round: &T::RoundID
     ) -> Result<(), StaticPartiesError> {
         Err(StaticPartiesError::Static)
     }
@@ -499,51 +588,39 @@ where
     #[inline]
     fn parties(
         &self,
-        _round: &Round
+        _round: &T::RoundID
     ) -> Result<Self::PartiesIter<'_>, Infallible> {
         Ok(self.parties.iter())
     }
 }
 
-impl<Round, PartyID, Party> PartiesMap<Round, PartyID, Party>
-    for StaticParties<Party>
-where
-    PartyID: Clone + From<usize> + Into<usize>,
-    Party: Clone + Eq + Hash
-{
-}
+impl<T> PartiesMap<T> for StaticParties<T::PartyID> where T: RoundPartyIdxTypes {}
 
-impl<Round, PartyID, Party> PartiesUpdate<Party>
-    for DynamicParties<Round, PartyID, Party>
+impl<T> PartiesUpdate<T::PartyID> for DynamicParties<T>
 where
-    PartyID: Clone + From<usize> + Into<usize>,
-    Party: Clone + Eq + Hash,
-    Round: Clone + Eq + Hash
+    T: RoundPartyIDTypes
 {
     fn update_parties(
         &mut self,
-        parties: Vec<Party>,
-        map: &[Option<Party>]
+        parties: Vec<T::PartyID>,
+        map: &[Option<T::PartyID>]
     ) {
         let new_parties = HashMap::with_capacity(parties.len());
         let mut old_parties = replace(&mut self.parties, new_parties);
 
         for (i, new_party) in parties.into_iter().enumerate() {
-            if let Some(old_party) = &map[i] {
-                if let Some(ent) = old_parties.remove(old_party) {
-                    self.parties.insert(new_party, ent);
-                }
+            if let Some(old_party) = &map[i] &&
+                let Some(ent) = old_parties.remove(old_party)
+            {
+                self.parties.insert(new_party, ent);
             }
         }
     }
 }
 
-impl<Round, PartyID, Party> PartiesRounds<Round>
-    for DynamicParties<Round, PartyID, Party>
+impl<T> PartiesRounds<T::RoundID> for DynamicParties<T>
 where
-    PartyID: Clone + From<usize> + Into<usize>,
-    Party: Clone + Eq + Hash,
-    Round: Clone + Eq + Hash
+    T: RoundPartyIDTypes
 {
     type AdvanceError = DynamicPartiesError;
     type RoundError = DynamicPartiesError;
@@ -551,7 +628,7 @@ where
     #[inline]
     fn next_round(
         &mut self,
-        round_id: Round
+        round_id: T::RoundID
     ) {
         self.rounds.insert(round_id, self.next);
         self.next += 1;
@@ -559,7 +636,7 @@ where
 
     fn advance_to(
         &mut self,
-        round: &Round
+        round: &T::RoundID
     ) -> Result<(), DynamicPartiesError> {
         match self.rounds.get(round) {
             Some(round_idx) => {
@@ -578,30 +655,27 @@ where
     #[inline]
     fn nparties_hint(
         &self,
-        _round: &Round
+        _round: &T::RoundID
     ) -> Result<usize, DynamicPartiesError> {
         Ok(self.parties.len())
     }
 }
 
-impl<Round, PartyID, Party> Parties<Round, Party>
-    for DynamicParties<Round, PartyID, Party>
+impl<T> Parties<T> for DynamicParties<T>
 where
-    PartyID: Clone + From<usize> + Into<usize>,
-    Party: Clone + Eq + Hash,
-    Round: Clone + Eq + Hash
+    T: RoundPartyIDTypes
 {
     type PartiesIter<'a>
-        = DynamicPartiesIter<'a, Party>
+        = DynamicPartiesIter<'a, T::PartyID>
     where
         Self: 'a,
-        Party: 'a;
+        T::PartyID: 'a;
     type PartyRoundError = DynamicPartiesError;
 
     fn start_party_at(
         &mut self,
-        party: Party,
-        round: &Round
+        party: T::PartyID,
+        round: &T::RoundID
     ) -> Result<(), DynamicPartiesError> {
         match self.rounds.get(round) {
             Some(round_idx) => match self.parties.entry(party) {
@@ -621,8 +695,8 @@ where
 
     fn stop_party_at(
         &mut self,
-        party: Party,
-        round: &Round
+        party: T::PartyID,
+        round: &T::RoundID
     ) -> Result<(), DynamicPartiesError> {
         match self.rounds.get(round) {
             Some(round_idx) => match self.parties.entry(party) {
@@ -638,7 +712,7 @@ where
 
     fn parties(
         &self,
-        round: &Round
+        round: &T::RoundID
     ) -> Result<Self::PartiesIter<'_>, DynamicPartiesError> {
         match self.rounds.get(round) {
             Some(round_id) => {
@@ -654,12 +728,8 @@ where
     }
 }
 
-impl<Round, PartyID, Party> PartiesMap<Round, PartyID, Party>
-    for DynamicParties<Round, PartyID, Party>
-where
-    PartyID: Clone + From<usize> + Into<usize>,
-    Party: Clone + Eq + Hash,
-    Round: Clone + Eq + Hash
+impl<T> PartiesMap<T> for DynamicParties<T> where
+    T: PartyTypes + RoundPartyIdxTypes
 {
 }
 
@@ -810,7 +880,7 @@ impl RoundIntervals {
                 start,
                 intervals,
                 end
-            } if start.map_or(true, |start| start.end <= round) => {
+            } if start.is_none_or(|start| start.end <= round) => {
                 let len = intervals.len();
 
                 for i in 0..len {
@@ -846,7 +916,7 @@ impl RoundIntervals {
                     }
                     _ => {
                         *start = None;
-                        intervals.truncate(0);
+                        intervals.clear();
                     }
                 }
             }
@@ -906,11 +976,9 @@ impl Display for RoundIntervals {
     }
 }
 
-impl<Round, PartyID, Party> Display for DynamicParties<Round, PartyID, Party>
+impl<T> Display for DynamicParties<T>
 where
-    PartyID: Clone + From<usize> + Into<usize>,
-    Party: Clone + Display + Eq + Hash,
-    Round: Clone + Display + Eq + Hash + Into<usize>
+    T: PartyTypes + RoundPartyIdxTypes
 {
     fn fmt(
         &self,
@@ -930,7 +998,9 @@ impl Display for StaticPartiesError {
         f: &mut Formatter<'_>
     ) -> Result<(), Error> {
         match self {
-            StaticPartiesError::Static => write!(f, "parties cannot be changed")
+            StaticPartiesError::Static => {
+                write!(f, "parties cannot be changed")
+            }
         }
     }
 }
@@ -1412,19 +1482,19 @@ fn test_round_intervals_advance_to_intervals_in_end() {
 
 #[test]
 fn test_parties_start_at() {
-    let mut parties: DynamicParties<usize, usize, isize> =
+    let mut parties: DynamicParties<TestPartyTypes> =
         DynamicParties::with_capacity(2, 2);
-    let expected: HashSet<isize> = [-1, 0].iter().map(|x| *x).collect();
+    let expected: HashSet<usize> = [5, 6].into_iter().collect();
 
     parties.next_round(0);
     parties.next_round(1);
-    parties.start_party_at(-1, &1).expect("Expected success");
-    parties.start_party_at(0, &1).expect("Expected success");
+    parties.start_party_at(5, &1).expect("Expected success");
+    parties.start_party_at(6, &1).expect("Expected success");
 
-    let actual: HashSet<isize> = parties
+    let actual: HashSet<usize> = parties
         .parties(&1)
         .expect("Expected success")
-        .map(|x| *x)
+        .cloned()
         .collect();
 
     assert_eq!(expected, actual)
@@ -1432,19 +1502,19 @@ fn test_parties_start_at() {
 
 #[test]
 fn test_parties_start_at_different() {
-    let mut parties: DynamicParties<usize, usize, isize> =
+    let mut parties: DynamicParties<TestPartyTypes> =
         DynamicParties::with_capacity(2, 2);
-    let expected: HashSet<isize> = [-1].iter().map(|x| *x).collect();
+    let expected: HashSet<usize> = [7].into_iter().collect();
 
     parties.next_round(1);
     parties.next_round(2);
-    parties.start_party_at(-1, &1).expect("Expected success");
-    parties.start_party_at(0, &2).expect("Expected success");
+    parties.start_party_at(7, &1).expect("Expected success");
+    parties.start_party_at(8, &2).expect("Expected success");
 
-    let actual: HashSet<isize> = parties
+    let actual: HashSet<usize> = parties
         .parties(&1)
         .expect("Expected success")
-        .map(|x| *x)
+        .cloned()
         .collect();
 
     assert_eq!(expected, actual)
@@ -1452,24 +1522,24 @@ fn test_parties_start_at_different() {
 
 #[test]
 fn test_parties_start_at_stop_at() {
-    let mut parties: DynamicParties<usize, usize, isize> =
+    let mut parties: DynamicParties<TestPartyTypes> =
         DynamicParties::with_capacity(2, 5);
-    let expected: HashSet<isize> = [].iter().map(|x| *x).collect();
+    let expected: HashSet<usize> = [].iter().map(|x| *x).collect();
 
     parties.next_round(0);
     parties.next_round(1);
     parties.next_round(2);
     parties.next_round(3);
     parties.next_round(4);
-    parties.start_party_at(-1, &1).expect("Expected success");
-    parties.start_party_at(0, &1).expect("Expected success");
-    parties.stop_party_at(-1, &3).expect("Expected success");
-    parties.stop_party_at(0, &3).expect("Expected success");
+    parties.start_party_at(6, &1).expect("Expected success");
+    parties.start_party_at(7, &1).expect("Expected success");
+    parties.stop_party_at(6, &3).expect("Expected success");
+    parties.stop_party_at(7, &3).expect("Expected success");
 
-    let actual: HashSet<isize> = parties
+    let actual: HashSet<usize> = parties
         .parties(&4)
         .expect("Expected success")
-        .map(|x| *x)
+        .cloned()
         .collect();
 
     assert_eq!(expected, actual)
@@ -1477,9 +1547,9 @@ fn test_parties_start_at_stop_at() {
 
 #[test]
 fn test_parties_start_at_stop_at_different() {
-    let mut parties: DynamicParties<usize, usize, isize> =
+    let mut parties: DynamicParties<TestPartyTypes> =
         DynamicParties::with_capacity(2, 6);
-    let expected: HashSet<isize> = [0].iter().map(|x| *x).collect();
+    let expected: HashSet<usize> = [9].iter().map(|x| *x).collect();
 
     parties.next_round(0);
     parties.next_round(1);
@@ -1487,15 +1557,15 @@ fn test_parties_start_at_stop_at_different() {
     parties.next_round(3);
     parties.next_round(4);
     parties.next_round(5);
-    parties.start_party_at(-1, &1).expect("Expected success");
-    parties.start_party_at(0, &1).expect("Expected success");
-    parties.stop_party_at(-1, &3).expect("Expected success");
-    parties.stop_party_at(0, &5).expect("Expected success");
+    parties.start_party_at(8, &1).expect("Expected success");
+    parties.start_party_at(9, &1).expect("Expected success");
+    parties.stop_party_at(8, &3).expect("Expected success");
+    parties.stop_party_at(9, &5).expect("Expected success");
 
-    let actual: HashSet<isize> = parties
+    let actual: HashSet<usize> = parties
         .parties(&4)
         .expect("Expected success")
-        .map(|x| *x)
+        .cloned()
         .collect();
 
     assert_eq!(expected, actual)
@@ -1503,20 +1573,20 @@ fn test_parties_start_at_stop_at_different() {
 
 #[test]
 fn test_parties_start_at_advance_to() {
-    let mut parties: DynamicParties<usize, usize, isize> =
+    let mut parties: DynamicParties<TestPartyTypes> =
         DynamicParties::with_capacity(2, 2);
-    let expected: HashSet<isize> = [-1, 0].iter().map(|x| *x).collect();
+    let expected: HashSet<usize> = [8, 9].iter().map(|x| *x).collect();
 
     parties.next_round(1);
     parties.next_round(2);
-    parties.start_party_at(-1, &1).expect("Expected success");
-    parties.start_party_at(0, &1).expect("Expected success");
+    parties.start_party_at(8, &1).expect("Expected success");
+    parties.start_party_at(9, &1).expect("Expected success");
     parties.advance_to(&2).expect("Expected success");
 
-    let actual: HashSet<isize> = parties
+    let actual: HashSet<usize> = parties
         .parties(&1)
         .expect("Expected success")
-        .map(|x| *x)
+        .cloned()
         .collect();
 
     assert_eq!(expected, actual)
@@ -1524,22 +1594,22 @@ fn test_parties_start_at_advance_to() {
 
 #[test]
 fn test_parties_start_at_different_advance_to() {
-    let mut parties: DynamicParties<usize, usize, isize> =
+    let mut parties: DynamicParties<TestPartyTypes> =
         DynamicParties::with_capacity(2, 4);
-    let expected: HashSet<isize> = [-1].iter().map(|x| *x).collect();
+    let expected: HashSet<usize> = [8].iter().map(|x| *x).collect();
 
     parties.next_round(1);
     parties.next_round(2);
     parties.next_round(3);
     parties.next_round(4);
-    parties.start_party_at(-1, &1).expect("Expected success");
-    parties.start_party_at(0, &4).expect("Expected success");
+    parties.start_party_at(8, &1).expect("Expected success");
+    parties.start_party_at(9, &4).expect("Expected success");
     parties.advance_to(&2).expect("Expected success");
 
-    let actual: HashSet<isize> = parties
+    let actual: HashSet<usize> = parties
         .parties(&3)
         .expect("Expected success")
-        .map(|x| *x)
+        .cloned()
         .collect();
 
     assert_eq!(expected, actual)
@@ -1547,25 +1617,25 @@ fn test_parties_start_at_different_advance_to() {
 
 #[test]
 fn test_parties_start_at_stop_at_advance_to() {
-    let mut parties: DynamicParties<usize, usize, isize> =
+    let mut parties: DynamicParties<TestPartyTypes> =
         DynamicParties::with_capacity(2, 5);
-    let expected: HashSet<isize> = [].iter().map(|x| *x).collect();
+    let expected: HashSet<usize> = [].iter().map(|x| *x).collect();
 
     parties.next_round(1);
     parties.next_round(2);
     parties.next_round(3);
     parties.next_round(4);
     parties.next_round(5);
-    parties.start_party_at(-1, &1).expect("Expected success");
-    parties.start_party_at(0, &1).expect("Expected success");
-    parties.stop_party_at(-1, &3).expect("Expected success");
-    parties.stop_party_at(0, &3).expect("Expected success");
+    parties.start_party_at(8, &1).expect("Expected success");
+    parties.start_party_at(9, &1).expect("Expected success");
+    parties.stop_party_at(8, &3).expect("Expected success");
+    parties.stop_party_at(9, &3).expect("Expected success");
     parties.advance_to(&4).expect("Expected success");
 
-    let actual: HashSet<isize> = parties
+    let actual: HashSet<usize> = parties
         .parties(&5)
         .expect("Expected success")
-        .map(|x| *x)
+        .cloned()
         .collect();
 
     assert_eq!(expected, actual)
@@ -1573,9 +1643,9 @@ fn test_parties_start_at_stop_at_advance_to() {
 
 #[test]
 fn test_parties_start_at_stop_at_different_advance_to() {
-    let mut parties: DynamicParties<usize, usize, isize> =
+    let mut parties: DynamicParties<TestPartyTypes> =
         DynamicParties::with_capacity(2, 6);
-    let expected: HashSet<isize> = [0].iter().map(|x| *x).collect();
+    let expected: HashSet<usize> = [9].iter().map(|x| *x).collect();
 
     parties.next_round(1);
     parties.next_round(2);
@@ -1583,16 +1653,16 @@ fn test_parties_start_at_stop_at_different_advance_to() {
     parties.next_round(4);
     parties.next_round(5);
     parties.next_round(6);
-    parties.start_party_at(-1, &1).expect("Expected success");
-    parties.start_party_at(0, &1).expect("Expected success");
-    parties.stop_party_at(-1, &3).expect("Expected success");
-    parties.stop_party_at(0, &6).expect("Expected success");
+    parties.start_party_at(8, &1).expect("Expected success");
+    parties.start_party_at(9, &1).expect("Expected success");
+    parties.stop_party_at(8, &3).expect("Expected success");
+    parties.stop_party_at(9, &6).expect("Expected success");
     parties.advance_to(&4).expect("Expected success");
 
-    let actual: HashSet<isize> = parties
+    let actual: HashSet<usize> = parties
         .parties(&5)
         .expect("Expected success")
-        .map(|x| *x)
+        .cloned()
         .collect();
 
     assert_eq!(expected, actual)

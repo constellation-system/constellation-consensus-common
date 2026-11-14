@@ -1,4 +1,4 @@
-# Copyright © 2024-25 The Johns Hopkins Applied Physics Laboratory LLC.
+# Copyright © 2024-26 The Johns Hopkins Applied Physics Laboratory LLC.
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License, version
@@ -22,42 +22,36 @@ description = "Common consensus protocol API for the Constellation distributed s
 repository = "https://github.com/constellation-system/constellation-consensus-common"
 version = "0.0.0"
 authors = [ "Eric McCorkle <eric.mccorkle@jhuapl.edu>" ]
-rust-version = "1.83"
+edition = "2024"
 license = "AGPL-3.0-only"
 keywords = ["networking", "distributed systems", "consensus"]
 categories = ["network-programming"]
 exclude = [
     ".gitignore"
 ]
-edition = "2018"
 
 [features]
 default = ["gssapi", "log", "openssl", "unix"]
 gssapi = [
-    "constellation-auth/gssapi",
     "constellation-common/gssapi"
 ]
 log = [
     "dep:log",
-    "constellation-auth/log",
     "constellation-common/log"
 ]
 openssl = [
-    "constellation-auth/openssl",
     "constellation-common/openssl"
 ]
 unix = [
-    "constellation-auth/unix",
     "constellation-common/unix"
 ]
 
 [dependencies]
 bitvec = { version = "1.0" }
-constellation-auth = { git = "https://github.com/constellation-system/constellation-auth.git", branch = "project/ioc", default-features = false }
 constellation-common = { git = "https://github.com/constellation-system/constellation-common.git", branch = "project/ioc", default-features = false }
 log = { version = "0.4", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 
 [dev-dependencies]
 env_logger = { version = "0.10" }
-serde_yaml = { version = "0.9" }
+yaml_serde = { version = "0.10" }
